@@ -1,94 +1,128 @@
-# Obsidian Sample Plugin
+# Backlink Metadata Updater
 
-This is a sample plugin for Obsidian (https://obsidian.md).
+An Obsidian plugin that automatically updates note metadata based on backlinks. When you mention a note in your daily notes or other contexts, the linked note's frontmatter properties are automatically updated with relevant metadata.
 
-This project uses TypeScript to provide type checking and documentation.
-The repo depends on the latest plugin API (obsidian.d.ts) in TypeScript Definition format, which contains TSDoc comments describing what it does.
+## Features
 
-This sample plugin demonstrates some of the basic functionality the plugin API can do.
-- Adds a ribbon icon, which shows a Notice when clicked.
-- Adds a command "Open Sample Modal" which opens a Modal.
-- Adds a plugin setting tab to the settings page.
-- Registers a global click event and output 'click' to the console.
-- Registers a global interval which logs 'setInterval' to the console.
+### Core Functionality
+- **Automatic Updates**: Real-time metadata updates when files are modified
+- **Configurable Rules**: Define custom rules for different note types and contexts
+- **Smart Date Extraction**: Automatically extracts dates from daily notes, filenames, and frontmatter
+- **Flexible Value Types**: Support for dates, links, titles, and custom values
+- **History Tracking**: Optional preservation of update history
 
-## First time developing plugins?
+### Rule-Based System
+Configure rules to control how metadata gets updated:
+- **Source Patterns**: Define which files trigger updates (e.g., `Daily Notes/*`)
+- **Target Criteria**: Specify which notes get updated (by tag or folder)
+- **Update Fields**: Choose which metadata fields to update
+- **Value Types**: Control what gets stored (date, title, links, etc.)
 
-Quick starting guide for new plugin devs:
+### Built-in Commands
+- **Process All Files**: Bulk update all metadata based on existing backlinks
+- **Process Current File**: Update metadata for the currently active file
+- **Validate Rules**: Check rule configuration for errors and conflicts
 
-- Check if [someone already developed a plugin for what you want](https://obsidian.md/plugins)! There might be an existing plugin similar enough that you can partner up with.
-- Make a copy of this repo as a template with the "Use this template" button (login to GitHub if you don't see it).
-- Clone your repo to a local development folder. For convenience, you can place this folder in your `.obsidian/plugins/your-plugin-name` folder.
-- Install NodeJS, then run `npm i` in the command line under your repo folder.
-- Run `npm run dev` to compile your plugin from `main.ts` to `main.js`.
-- Make changes to `main.ts` (or create new `.ts` files). Those changes should be automatically compiled into `main.js`.
-- Reload Obsidian to load the new version of your plugin.
-- Enable plugin in settings window.
-- For updates to the Obsidian API run `npm update` in the command line under your repo folder.
+## Quick Start
 
-## Releasing new releases
+1. Install the plugin
+2. Open Settings → Backlink Metadata Updater
+3. Configure your first rule:
+   - Source Pattern: `Daily Notes/*` (or your daily notes folder)
+   - Target Tag: `#movie` (or any tag you use)
+   - Update Field: `lastWatched`
+   - Value Type: `date`
+4. Start linking to tagged notes from your daily notes!
 
-- Update your `manifest.json` with your new version number, such as `1.0.1`, and the minimum Obsidian version required for your latest release.
-- Update your `versions.json` file with `"new-plugin-version": "minimum-obsidian-version"` so older versions of Obsidian can download an older version of your plugin that's compatible.
-- Create new GitHub release using your new version number as the "Tag version". Use the exact version number, don't include a prefix `v`. See here for an example: https://github.com/obsidianmd/obsidian-sample-plugin/releases
-- Upload the files `manifest.json`, `main.js`, `styles.css` as binary attachments. Note: The manifest.json file must be in two places, first the root path of your repository and also in the release.
-- Publish the release.
+## Example Rules
 
-> You can simplify the version bump process by running `npm version patch`, `npm version minor` or `npm version major` after updating `minAppVersion` manually in `manifest.json`.
-> The command will bump version in `manifest.json` and `package.json`, and add the entry for the new version to `versions.json`
+### Movies and Books
+```yaml
+# When you link to a #movie from a daily note, update its lastWatched date
+Source: Daily Notes/*
+Target: #movie
+Field: lastWatched
+Type: date
 
-## Adding your plugin to the community plugin list
-
-- Check the [plugin guidelines](https://docs.obsidian.md/Plugins/Releasing/Plugin+guidelines).
-- Publish an initial version.
-- Make sure you have a `README.md` file in the root of your repo.
-- Make a pull request at https://github.com/obsidianmd/obsidian-releases to add your plugin.
-
-## How to use
-
-- Clone this repo.
-- Make sure your NodeJS is at least v16 (`node --version`).
-- `npm i` or `yarn` to install dependencies.
-- `npm run dev` to start compilation in watch mode.
-
-## Manually installing the plugin
-
-- Copy over `main.js`, `styles.css`, `manifest.json` to your vault `VaultFolder/.obsidian/plugins/your-plugin-id/`.
-
-## Improve code quality with eslint (optional)
-- [ESLint](https://eslint.org/) is a tool that analyzes your code to quickly find problems. You can run ESLint against your plugin to find common bugs and ways to improve your code. 
-- To use eslint with this project, make sure to install eslint from terminal:
-  - `npm install -g eslint`
-- To use eslint to analyze this project use this command:
-  - `eslint main.ts`
-  - eslint will then create a report with suggestions for code improvement by file and line number.
-- If your source code is in a folder, such as `src`, you can use eslint with this command to analyze all files in that folder:
-  - `eslint .\src\`
-
-## Funding URL
-
-You can include funding URLs where people who use your plugin can financially support it.
-
-The simple way is to set the `fundingUrl` field to your link in your `manifest.json` file:
-
-```json
-{
-    "fundingUrl": "https://buymeacoffee.com"
-}
+# When you link to a #book from a daily note, update its lastRead date  
+Source: Daily Notes/*
+Target: #book
+Field: lastRead
+Type: date
 ```
 
-If you have multiple URLs, you can also do:
-
-```json
-{
-    "fundingUrl": {
-        "Buy Me a Coffee": "https://buymeacoffee.com",
-        "GitHub Sponsor": "https://github.com/sponsors",
-        "Patreon": "https://www.patreon.com/"
-    }
-}
+### Meeting Notes
+```yaml
+# When you link to a #person from meeting notes, track the meeting
+Source: Meeting Notes/*
+Target: #person
+Field: lastMeeting
+Type: date_and_title
 ```
 
-## API Documentation
+### Project References
+```yaml
+# Track which projects reference specific resources
+Source: Projects/*
+Target: Resources/*
+Field: referencedIn
+Type: append_unique_link
+```
 
-See https://github.com/obsidianmd/obsidian-api
+## Configuration
+
+### Plugin Options
+- **Preserve History**: Keep track of all updates in separate history fields
+- **Update on Delete**: Clean up metadata when links are removed
+- **Date Format**: Customize date format (uses moment.js format strings)
+- **Debounce Delay**: Control processing delay for rapid edits
+- **Enable Logging**: Debug logging to browser console
+
+### Value Types
+- `date`: Extract and store just the date
+- `date_and_title`: Store date, title, and source link
+- `append_link`: Add source file link to an array
+- `append_unique_link`: Add source link only if not already present
+- `replace_link`: Replace field with source link
+
+## Best Practices
+
+### Organizing Rules
+- Use clear, descriptive rule names
+- Set appropriate priorities for conflicting rules
+- Test rules with small sets of files first
+- Use the validation command to check for conflicts
+
+### Performance
+- The plugin debounces file changes to avoid excessive processing
+- Use specific source patterns rather than broad wildcards
+- Enable logging only when debugging issues
+
+### Data Safety
+- The plugin uses Obsidian's atomic frontmatter processing
+- Always backup your vault before bulk operations
+- Test new rules on a small subset of files first
+
+## Development
+
+### Building from Source
+```bash
+git clone <repository>
+cd awesome-obsidian-meta-updater
+npm install
+npm run build
+```
+
+### Architecture
+- **Main Plugin**: Handles lifecycle and coordination
+- **RuleEngine**: Manages rule matching and validation
+- **BacklinkProcessor**: Processes files and updates metadata
+- **DateExtractor**: Extracts dates from various sources
+
+## Manually Installing the Plugin
+
+- Copy over `main.js`, `styles.css`, `manifest.json` to your vault `VaultFolder/.obsidian/plugins/backlink-metadata-updater/`.
+
+## License
+
+MIT License - see LICENSE file for details.
