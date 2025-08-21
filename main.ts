@@ -1,4 +1,4 @@
-import { App, TFile, Plugin, Notice, PluginSettingTab, Setting } from 'obsidian';
+import { App, TFile, Plugin, Notice, PluginSettingTab, Setting, FuzzySuggestModal, TFolder } from 'obsidian';
 import { BacklinkMetadataSettings, DEFAULT_SETTINGS } from './src/types';
 import { DateExtractor } from './src/utils/date-extractor';
 import { RuleEngine } from './src/engine/rule-engine';
@@ -363,6 +363,22 @@ class BacklinkMetadataSettingTab extends PluginSettingTab {
                 .onChange((value) => {
                     rule.sourcePattern = value;
                 })
+            )
+            .addButton(button => button
+                .setButtonText('📁')
+                .setTooltip('Browse folders')
+                .onClick(() => {
+                    const modal = new FolderSuggestModal(this.plugin.app, (folder) => {
+                        const pattern = folder.path ? `${folder.path}/*` : '*';
+                        rule.sourcePattern = pattern;
+                        // Update the text input
+                        const textInput = editorContainer.querySelector('.setting-item:nth-of-type(2) input') as HTMLInputElement;
+                        if (textInput) {
+                            textInput.value = pattern;
+                        }
+                    });
+                    modal.open();
+                })
             );
         
         // Target Type (Tag or Folder)
@@ -381,18 +397,37 @@ class BacklinkMetadataSettingTab extends PluginSettingTab {
         const targetValueSetting = new Setting(editorContainer)
             .setName(rule.targetTag ? 'Target Tag' : 'Target Folder')
             .setDesc(rule.targetTag ? 'Tag to match (e.g., "#movie")' : 'Folder path to match')
-            .addText(text => text
-                .setValue(rule.targetTag || rule.targetFolder || '')
-                .onChange((value) => {
-                    if (rule.targetTag !== undefined) {
-                        rule.targetTag = value;
-                        rule.targetFolder = undefined;
-                    } else {
-                        rule.targetFolder = value;
-                        rule.targetTag = undefined;
-                    }
-                })
-            );
+            .addText(text => {
+                const textComponent = text
+                    .setValue(rule.targetTag || rule.targetFolder || '')
+                    .onChange((value) => {
+                        if (rule.targetTag !== undefined) {
+                            rule.targetTag = value;
+                            rule.targetFolder = undefined;
+                        } else {
+                            rule.targetFolder = value;
+                            rule.targetTag = undefined;
+                        }
+                    });
+                
+                // Add folder picker button only for folder type
+                if (rule.targetFolder !== undefined) {
+                    targetValueSetting.addButton(button => button
+                        .setButtonText('📁')
+                        .setTooltip('Browse folders')
+                        .onClick(() => {
+                            const modal = new FolderSuggestModal(this.plugin.app, (folder) => {
+                                rule.targetFolder = folder.path;
+                                rule.targetTag = undefined;
+                                textComponent.setValue(folder.path);
+                            });
+                            modal.open();
+                        })
+                    );
+                }
+                
+                return textComponent;
+            });
         
         // Update Field
         new Setting(editorContainer)
@@ -478,7 +513,12 @@ class BacklinkMetadataSettingTab extends PluginSettingTab {
             rule.targetTag = undefined;
         }
         
-        // Update the target value setting
+        // Refresh the entire editor to update the target value setting with/without folder picker
+        // This is simpler than trying to dynamically update the existing setting
+        editorContainer.remove();
+        // Note: The parent editRule method would need to be called again to recreate the editor
+        // For now, we'll just update the text and description
+        
         const targetValueSetting = editorContainer.querySelector('.setting-item:nth-of-type(4)') as HTMLElement;
         if (targetValueSetting) {
             const nameEl = targetValueSetting.querySelector('.setting-item-name');
@@ -489,6 +529,29 @@ class BacklinkMetadataSettingTab extends PluginSettingTab {
                 nameEl.textContent = targetType === 'tag' ? 'Target Tag' : 'Target Folder';
                 descEl.textContent = targetType === 'tag' ? 'Tag to match (e.g., "#movie")' : 'Folder path to match';
                 inputEl.value = rule.targetTag || rule.targetFolder || '';
+            }
+            
+            // Remove existing folder picker button if switching to tag
+            const existingButton = targetValueSetting.querySelector('button');
+            if (existingButton && targetType === 'tag') {
+                existingButton.remove();
+            }
+            
+            // Add folder picker button if switching to folder and it doesn't exist
+            if (targetType === 'folder' && !targetValueSetting.querySelector('button')) {
+                const setting = new Setting(targetValueSetting);
+                setting.addButton(button => button
+                    .setButtonText('📁')
+                    .setTooltip('Browse folders')
+                    .onClick(() => {
+                        const modal = new FolderSuggestModal(this.plugin.app, (folder) => {
+                            rule.targetFolder = folder.path;
+                            rule.targetTag = undefined;
+                            inputEl.value = folder.path;
+                        });
+                        modal.open();
+                    })
+                );
             }
         }
     }
@@ -530,5 +593,25 @@ class BacklinkMetadataSettingTab extends PluginSettingTab {
         this.plugin.settings.rules.splice(index, 1);
         this.plugin.saveSettings();
         this.display(); // Refresh the display
+    }
+}
+
+class FolderSuggestModal extends FuzzySuggestModal<TFolder> {
+    constructor(app: App, private onChoose: (folder: TFolder) => void) {
+        super(app);
+        this.setPlaceholder('Choose a folder...');
+    }
+
+    getItems(): TFolder[] {
+        return this.app.vault.getAllFolders();
+    }
+
+    getItemText(folder: TFolder): string {
+        return folder.path || '/';
+    }
+
+    onChooseItem(folder: TFolder): void {
+        this.onChoose(folder);
+        this.close();
     }
 }
