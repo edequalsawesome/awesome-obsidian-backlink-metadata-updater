@@ -195,7 +195,24 @@ export class BacklinkProcessor {
         switch (valueType) {
             case 'date':
             case 'date_and_title':
-                // Replace with new value
+                // For date fields, only update if the new date is more recent
+                if (currentValue && newValue) {
+                    const currentDate = new Date(currentValue);
+                    const newDate = new Date(newValue);
+                    
+                    console.log(`BacklinkProcessor: Date comparison - current: ${currentValue} (${currentDate.toISOString()}), new: ${newValue} (${newDate.toISOString()})`);
+                    
+                    // Only update if new date is more recent (or if dates are invalid, use new value)
+                    if (isNaN(currentDate.getTime()) || isNaN(newDate.getTime()) || newDate > currentDate) {
+                        console.log(`BacklinkProcessor: Using new date ${newValue} (more recent or invalid dates)`);
+                        return newValue;
+                    } else {
+                        console.log(`BacklinkProcessor: Keeping existing date ${currentValue} (more recent than ${newValue})`);
+                        // Keep the existing more recent date
+                        return currentValue;
+                    }
+                }
+                // If no current value or new value is missing, use new value
                 return newValue;
                 
             case 'append_link':

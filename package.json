@@ -1,6 +1,6 @@
 {
 	"name": "awesome-obsidian-meta-updater",
-	"version": "1.0.3",
+	"version": "1.0.4",
 	"description": "Automatically updates note metadata based on backlinks",
 	"main": "main.js",
 	"scripts": {
