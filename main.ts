@@ -453,7 +453,7 @@ class BacklinkMetadataSettingTab extends PluginSettingTab {
                     const modal = new FolderSuggestModal(this.plugin.app, (folder) => {
                         const pattern = folder.path ? `${folder.path}/*` : '*';
                         rule.sourcePattern = pattern;
-                        textEl.setValue(pattern);
+                        textEl.setValue(folder.path || ''); // Show folder path without /*
                     });
                     modal.open();
                 });
@@ -498,7 +498,7 @@ class BacklinkMetadataSettingTab extends PluginSettingTab {
                             const pattern = folder.path ? `${folder.path}/*` : '*';
                             rule.targetFolder = pattern;
                             rule.targetTag = undefined;
-                            textComponent.setValue(pattern);
+                            textComponent.setValue(folder.path || ''); // Show folder path without /*
                         });
                         modal.open();
                     });
