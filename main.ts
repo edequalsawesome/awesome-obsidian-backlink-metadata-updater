@@ -392,7 +392,7 @@ class BacklinkMetadataSettingTab extends PluginSettingTab {
             );
         
         // Target Value
-        const targetValueSetting = new Setting(editorContainer)
+        new Setting(editorContainer)
             .setName(rule.targetTag ? 'Target Tag' : 'Target Folder')
             .setDesc(rule.targetTag ? 'Tag to match (e.g., "#movie")' : 'Folder path to match (click to browse folders)')
             .addText(text => {
@@ -515,9 +515,6 @@ class BacklinkMetadataSettingTab extends PluginSettingTab {
         }
         
         // Update the target value setting without removing the entire editor
-        // Note: The parent editRule method would need to be called again to recreate the editor
-        // For now, we'll just update the text and description
-        
         const targetValueSetting = editorContainer.querySelector('.setting-item:nth-of-type(4)') as HTMLElement;
         if (targetValueSetting) {
             const nameEl = targetValueSetting.querySelector('.setting-item-name');
