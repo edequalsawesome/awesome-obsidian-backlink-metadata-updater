@@ -413,9 +413,10 @@ class BacklinkMetadataSettingTab extends PluginSettingTab {
                     textComponent.inputEl.style.cursor = 'pointer';
                     textComponent.inputEl.addEventListener('click', () => {
                         const modal = new FolderSuggestModal(this.plugin.app, (folder) => {
-                            rule.targetFolder = folder.path;
+                            const pattern = folder.path ? `${folder.path}/*` : '*';
+                            rule.targetFolder = pattern;
                             rule.targetTag = undefined;
-                            textComponent.setValue(folder.path);
+                            textComponent.setValue(pattern);
                         });
                         modal.open();
                     });
@@ -537,9 +538,10 @@ class BacklinkMetadataSettingTab extends PluginSettingTab {
                 // Add folder picker click handler
                 newInputEl.addEventListener('click', () => {
                     const modal = new FolderSuggestModal(this.plugin.app, (folder) => {
-                        rule.targetFolder = folder.path;
+                        const pattern = folder.path ? `${folder.path}/*` : '*';
+                        rule.targetFolder = pattern;
                         rule.targetTag = undefined;
-                        newInputEl.value = folder.path;
+                        newInputEl.value = pattern;
                     });
                     modal.open();
                 });
