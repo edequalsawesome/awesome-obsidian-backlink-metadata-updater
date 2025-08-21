@@ -228,7 +228,15 @@ export class BacklinkProcessor {
      * Add entry to history tracking
      */
     private addToHistory(frontMatter: any, field: string, value: any, context: ProcessingContext): void {
-        const historyField = `${field}History`;
+        // Use custom history field names for specific fields
+        let historyField: string;
+        if (field === 'lastWatched') {
+            historyField = 'watchHistory';
+        } else if (field === 'lastRead') {
+            historyField = 'readHistory';
+        } else {
+            historyField = `${field}History`;
+        }
         
         console.log(`BacklinkProcessor: addToHistory called for field ${field}, historyField: ${historyField}`);
         
@@ -237,15 +245,31 @@ export class BacklinkProcessor {
             console.log(`BacklinkProcessor: Created new history array for ${historyField}`);
         }
         
-        const historyEntry: MetadataUpdate = {
-            field,
-            value,
-            timestamp: new Date().toISOString(),
-            sourceContext: context.sourceFile
-        };
+        // For date fields, just store the date value (YYYY-MM-DD)
+        // For other fields, store the full metadata
+        let historyEntry: any;
+        if (field === 'lastWatched' || field === 'lastRead') {
+            historyEntry = value; // Just store the date string
+        } else {
+            historyEntry = {
+                field,
+                value,
+                timestamp: new Date().toISOString(),
+                sourceContext: context.sourceFile
+            };
+        }
         
         console.log(`BacklinkProcessor: Adding history entry:`, historyEntry);
-        frontMatter[historyField].push(historyEntry);
+        
+        // Avoid duplicates for date fields
+        if (field === 'lastWatched' || field === 'lastRead') {
+            if (!frontMatter[historyField].includes(value)) {
+                frontMatter[historyField].push(historyEntry);
+            }
+        } else {
+            frontMatter[historyField].push(historyEntry);
+        }
+        
         console.log(`BacklinkProcessor: History array now has ${frontMatter[historyField].length} entries`);
     }
 
