@@ -9,6 +9,7 @@ export default class BacklinkMetadataPlugin extends Plugin {
     private dateExtractor: DateExtractor;
     private ruleEngine: RuleEngine;
     private processor: BacklinkProcessor;
+    private fileContentCache: Map<string, { content: string; links: string[] }> = new Map();
 
     async onload() {
         await this.loadSettings();
@@ -71,15 +72,93 @@ export default class BacklinkMetadataPlugin extends Plugin {
             return;
         }
 
+        // Get current content and links
+        const currentContent = await this.app.vault.read(file);
+        const currentLinks = this.extractFileLinks(file);
+        
+        // Get cached content and links
+        const cached = this.fileContentCache.get(file.path);
+        
+        // Check if content or links actually changed
+        if (cached) {
+            const contentChanged = cached.content !== currentContent;
+            const linksChanged = !this.arraysEqual(cached.links, currentLinks);
+            
+            console.log(`File ${file.path}: contentChanged=${contentChanged}, linksChanged=${linksChanged}`);
+            
+            // Only process if content changed AND links are involved
+            if (!contentChanged) {
+                console.log(`File ${file.path}: Only metadata changed, skipping processing`);
+                return;
+            }
+            
+            if (!linksChanged && currentLinks.length === 0) {
+                console.log(`File ${file.path}: Content changed but no links present, skipping processing`);
+                return;
+            }
+            
+            // If links changed, we want to know which ones are new
+            if (linksChanged) {
+                const newLinks = currentLinks.filter(link => !cached.links.includes(link));
+                const removedLinks = cached.links.filter(link => !currentLinks.includes(link));
+                
+                console.log(`File ${file.path}: New links: ${newLinks.length}, Removed links: ${removedLinks.length}`);
+                
+                if (newLinks.length === 0 && removedLinks.length === 0) {
+                    console.log(`File ${file.path}: Link positions changed but no new/removed links, skipping processing`);
+                    // Update cache but don't process
+                    this.fileContentCache.set(file.path, { content: currentContent, links: currentLinks });
+                    return;
+                }
+            }
+        }
+        
+        // Update cache
+        this.fileContentCache.set(file.path, { content: currentContent, links: currentLinks });
+        
         console.log(`File ${file.path} will be processed`);
 
         // Schedule processing with debouncing
         this.processor.scheduleProcessing(file, this.settings.rules, this.settings.options);
     }
 
+    private extractFileLinks(file: TFile): string[] {
+        const cache = this.app.metadataCache.getFileCache(file);
+        if (!cache?.links) {
+            return [];
+        }
+
+        const links: string[] = [];
+        for (const link of cache.links) {
+            const resolvedFile = this.app.metadataCache.getFirstLinkpathDest(link.link, file.path);
+            if (resolvedFile && resolvedFile instanceof TFile) {
+                links.push(resolvedFile.path);
+            }
+        }
+        
+        return [...new Set(links)]; // Remove duplicates and sort for consistent comparison
+    }
+
+    private arraysEqual(a: string[], b: string[]): boolean {
+        if (a.length !== b.length) return false;
+        
+        // Sort both arrays for consistent comparison
+        const sortedA = [...a].sort();
+        const sortedB = [...b].sort();
+        
+        return sortedA.every((val, index) => val === sortedB[index]);
+    }
+
     private async handleFileRename(file: TFile, oldPath: string) {
         if (this.settings.options.enableLogging) {
             console.log(`File renamed: ${oldPath} -> ${file.path}`);
+        }
+
+        // Update cache with new path
+        const cached = this.fileContentCache.get(oldPath);
+        if (cached) {
+            this.fileContentCache.delete(oldPath);
+            this.fileContentCache.set(file.path, cached);
         }
 
         // Process the renamed file
@@ -91,7 +170,10 @@ export default class BacklinkMetadataPlugin extends Plugin {
             console.log(`File deleted: ${file.path}`);
         }
 
-        // Note: Cleanup logic could be added here if needed
+        // Clean up cache for deleted file
+        this.fileContentCache.delete(file.path);
+
+        // Note: Could add cleanup logic for removing metadata from other files if needed
     }
 
     private shouldProcessFile(file: TFile): boolean {
