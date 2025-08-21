@@ -357,29 +357,27 @@ class BacklinkMetadataSettingTab extends PluginSettingTab {
         // Source Pattern
         new Setting(editorContainer)
             .setName('Source Pattern')
-            .setDesc('Glob pattern for files that trigger updates (e.g., "Daily Notes/*")')
-            .addText(text => text
-                .setValue(rule.sourcePattern)
-                .onChange((value) => {
-                    rule.sourcePattern = value;
-                })
-            )
-            .addButton(button => button
-                .setButtonText('📁')
-                .setTooltip('Browse folders')
-                .onClick(() => {
+            .setDesc('Glob pattern for files that trigger updates (click to browse folders)')
+            .addText(text => {
+                const textEl = text
+                    .setValue(rule.sourcePattern)
+                    .onChange((value) => {
+                        rule.sourcePattern = value;
+                    });
+                
+                // Make the text field clickable like Templater
+                textEl.inputEl.style.cursor = 'pointer';
+                textEl.inputEl.addEventListener('click', () => {
                     const modal = new FolderSuggestModal(this.plugin.app, (folder) => {
                         const pattern = folder.path ? `${folder.path}/*` : '*';
                         rule.sourcePattern = pattern;
-                        // Update the text input
-                        const textInput = editorContainer.querySelector('.setting-item:nth-of-type(2) input') as HTMLInputElement;
-                        if (textInput) {
-                            textInput.value = pattern;
-                        }
+                        textEl.setValue(pattern);
                     });
                     modal.open();
-                })
-            );
+                });
+                
+                return textEl;
+            });
         
         // Target Type (Tag or Folder)
         const targetTypeSetting = new Setting(editorContainer)
@@ -396,7 +394,7 @@ class BacklinkMetadataSettingTab extends PluginSettingTab {
         // Target Value
         const targetValueSetting = new Setting(editorContainer)
             .setName(rule.targetTag ? 'Target Tag' : 'Target Folder')
-            .setDesc(rule.targetTag ? 'Tag to match (e.g., "#movie")' : 'Folder path to match')
+            .setDesc(rule.targetTag ? 'Tag to match (e.g., "#movie")' : 'Folder path to match (click to browse folders)')
             .addText(text => {
                 const textComponent = text
                     .setValue(rule.targetTag || rule.targetFolder || '')
@@ -410,20 +408,17 @@ class BacklinkMetadataSettingTab extends PluginSettingTab {
                         }
                     });
                 
-                // Add folder picker button only for folder type
+                // Make folder field clickable like Templater when it's a folder type
                 if (rule.targetFolder !== undefined) {
-                    targetValueSetting.addButton(button => button
-                        .setButtonText('📁')
-                        .setTooltip('Browse folders')
-                        .onClick(() => {
-                            const modal = new FolderSuggestModal(this.plugin.app, (folder) => {
-                                rule.targetFolder = folder.path;
-                                rule.targetTag = undefined;
-                                textComponent.setValue(folder.path);
-                            });
-                            modal.open();
-                        })
-                    );
+                    textComponent.inputEl.style.cursor = 'pointer';
+                    textComponent.inputEl.addEventListener('click', () => {
+                        const modal = new FolderSuggestModal(this.plugin.app, (folder) => {
+                            rule.targetFolder = folder.path;
+                            rule.targetTag = undefined;
+                            textComponent.setValue(folder.path);
+                        });
+                        modal.open();
+                    });
                 }
                 
                 return textComponent;
@@ -492,6 +487,12 @@ class BacklinkMetadataSettingTab extends PluginSettingTab {
                 return;
             }
             
+            // Update the rule in the settings array
+            const ruleIndex = this.plugin.settings.rules.findIndex(r => r.id === rule.id);
+            if (ruleIndex !== -1) {
+                this.plugin.settings.rules[ruleIndex] = { ...rule };
+            }
+            
             await this.plugin.saveSettings();
             editorContainer.remove();
             this.display(); // Refresh to show updated rule
@@ -513,9 +514,7 @@ class BacklinkMetadataSettingTab extends PluginSettingTab {
             rule.targetTag = undefined;
         }
         
-        // Refresh the entire editor to update the target value setting with/without folder picker
-        // This is simpler than trying to dynamically update the existing setting
-        editorContainer.remove();
+        // Update the target value setting without removing the entire editor
         // Note: The parent editRule method would need to be called again to recreate the editor
         // For now, we'll just update the text and description
         
@@ -527,31 +526,42 @@ class BacklinkMetadataSettingTab extends PluginSettingTab {
             
             if (nameEl && descEl && inputEl) {
                 nameEl.textContent = targetType === 'tag' ? 'Target Tag' : 'Target Folder';
-                descEl.textContent = targetType === 'tag' ? 'Tag to match (e.g., "#movie")' : 'Folder path to match';
+                descEl.textContent = targetType === 'tag' ? 'Tag to match (e.g., "#movie")' : 'Folder path to match (click to browse folders)';
                 inputEl.value = rule.targetTag || rule.targetFolder || '';
             }
             
-            // Remove existing folder picker button if switching to tag
-            const existingButton = targetValueSetting.querySelector('button');
-            if (existingButton && targetType === 'tag') {
-                existingButton.remove();
-            }
-            
-            // Add folder picker button if switching to folder and it doesn't exist
-            if (targetType === 'folder' && !targetValueSetting.querySelector('button')) {
-                const setting = new Setting(targetValueSetting);
-                setting.addButton(button => button
-                    .setButtonText('📁')
-                    .setTooltip('Browse folders')
-                    .onClick(() => {
-                        const modal = new FolderSuggestModal(this.plugin.app, (folder) => {
-                            rule.targetFolder = folder.path;
-                            rule.targetTag = undefined;
-                            inputEl.value = folder.path;
-                        });
-                        modal.open();
-                    })
-                );
+            // Set up appropriate cursor and click behavior
+            if (targetType === 'folder') {
+                inputEl.style.cursor = 'pointer';
+                // Remove any existing click handlers by cloning the element
+                const newInputEl = inputEl.cloneNode(true) as HTMLInputElement;
+                inputEl.replaceWith(newInputEl);
+                
+                // Add folder picker click handler
+                newInputEl.addEventListener('click', () => {
+                    const modal = new FolderSuggestModal(this.plugin.app, (folder) => {
+                        rule.targetFolder = folder.path;
+                        rule.targetTag = undefined;
+                        newInputEl.value = folder.path;
+                    });
+                    modal.open();
+                });
+                
+                // Add change handler for manual typing
+                newInputEl.addEventListener('input', (e) => {
+                    rule.targetFolder = (e.target as HTMLInputElement).value;
+                    rule.targetTag = undefined;
+                });
+            } else {
+                inputEl.style.cursor = 'text';
+                // For tag input, just ensure the change handler works
+                const newInputEl = inputEl.cloneNode(true) as HTMLInputElement;
+                inputEl.replaceWith(newInputEl);
+                
+                newInputEl.addEventListener('input', (e) => {
+                    rule.targetTag = (e.target as HTMLInputElement).value;
+                    rule.targetFolder = undefined;
+                });
             }
         }
     }

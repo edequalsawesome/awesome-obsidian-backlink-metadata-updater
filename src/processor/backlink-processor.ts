@@ -174,13 +174,16 @@ export class BacklinkProcessor {
             const currentValue = frontMatter[field];
             const newValue = this.mergeValues(currentValue, value, context.rule.valueType, options);
             
+            console.log(`BacklinkProcessor: Processing field ${field}, currentValue:`, currentValue, 'newValue:', newValue);
+            
+            // Add history tracking if enabled (before updating the field)
+            if (options.preserveHistory && value !== null && value !== undefined) {
+                console.log(`BacklinkProcessor: Adding to history for field ${field}, preserveHistory: ${options.preserveHistory}`);
+                this.addToHistory(frontMatter, field, value, context);
+            }
+            
             if (newValue !== undefined) {
                 frontMatter[field] = newValue;
-                
-                // Add history tracking if enabled
-                if (options.preserveHistory) {
-                    this.addToHistory(frontMatter, field, value, context);
-                }
             }
         });
     }
@@ -227,8 +230,11 @@ export class BacklinkProcessor {
     private addToHistory(frontMatter: any, field: string, value: any, context: ProcessingContext): void {
         const historyField = `${field}History`;
         
+        console.log(`BacklinkProcessor: addToHistory called for field ${field}, historyField: ${historyField}`);
+        
         if (!frontMatter[historyField]) {
             frontMatter[historyField] = [];
+            console.log(`BacklinkProcessor: Created new history array for ${historyField}`);
         }
         
         const historyEntry: MetadataUpdate = {
@@ -238,7 +244,9 @@ export class BacklinkProcessor {
             sourceContext: context.sourceFile
         };
         
+        console.log(`BacklinkProcessor: Adding history entry:`, historyEntry);
         frontMatter[historyField].push(historyEntry);
+        console.log(`BacklinkProcessor: History array now has ${frontMatter[historyField].length} entries`);
     }
 
     /**
