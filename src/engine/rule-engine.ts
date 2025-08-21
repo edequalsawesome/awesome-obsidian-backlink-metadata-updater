@@ -55,15 +55,20 @@ export class RuleEngine {
     private matchesTargetCriteria(rule: Rule, targetFile: TFile): boolean {
         // Check target tag if specified
         if (rule.targetTag) {
-            return this.fileHasTag(targetFile, rule.targetTag);
+            const hasTag = this.fileHasTag(targetFile, rule.targetTag);
+            console.log(`RuleEngine: Target file ${targetFile.path} has tag ${rule.targetTag}: ${hasTag}`);
+            return hasTag;
         }
         
         // Check target folder if specified
         if (rule.targetFolder) {
-            return this.matchesGlobPattern(rule.targetFolder, targetFile.path);
+            const matchesFolder = this.matchesGlobPattern(rule.targetFolder, targetFile.path);
+            console.log(`RuleEngine: Target file ${targetFile.path} matches folder pattern ${rule.targetFolder}: ${matchesFolder}`);
+            return matchesFolder;
         }
         
         // If no specific target criteria, match all files
+        console.log(`RuleEngine: No target criteria specified, matching all files for ${targetFile.path}`);
         return true;
     }
 
@@ -72,10 +77,16 @@ export class RuleEngine {
      */
     private fileHasTag(file: TFile, tag: string): boolean {
         const cache = this.app.metadataCache.getFileCache(file);
-        if (!cache) return false;
+        console.log(`RuleEngine: Cache for ${file.path}:`, cache);
+        
+        if (!cache) {
+            console.log(`RuleEngine: No cache found for ${file.path}`);
+            return false;
+        }
 
         // Remove # from tag if present
         const cleanTag = tag.startsWith('#') ? tag.slice(1) : tag;
+        console.log(`RuleEngine: Looking for tag '${cleanTag}' in ${file.path}`);
         
         // Check frontmatter tags
         if (cache.frontmatter?.tags) {
@@ -83,18 +94,27 @@ export class RuleEngine {
                 ? cache.frontmatter.tags 
                 : [cache.frontmatter.tags];
             
+            console.log(`RuleEngine: Frontmatter tags for ${file.path}:`, frontmatterTags);
+            
             if (frontmatterTags.some((t: string) => t === cleanTag)) {
+                console.log(`RuleEngine: Found matching tag '${cleanTag}' in frontmatter`);
                 return true;
             }
         }
         
         // Check inline tags
         if (cache.tags) {
-            return cache.tags.some((tagCache: any) => 
+            console.log(`RuleEngine: Inline tags for ${file.path}:`, cache.tags);
+            const hasInlineTag = cache.tags.some((tagCache: any) => 
                 tagCache.tag === `#${cleanTag}` || tagCache.tag === cleanTag
             );
+            if (hasInlineTag) {
+                console.log(`RuleEngine: Found matching tag '${cleanTag}' in inline tags`);
+                return true;
+            }
         }
         
+        console.log(`RuleEngine: No matching tag '${cleanTag}' found in ${file.path}`);
         return false;
     }
 
