@@ -65,7 +65,7 @@ export const DEFAULT_SETTINGS: BacklinkMetadataSettings = {
         {
             id: 'daily-to-movies',
             name: 'Daily Notes → Movies',
-            sourcePattern: 'Daily Notes/*',
+            sourcePattern: '! Daily Log/*/*',
             targetTag: '#movie',
             updateField: 'lastWatched',
             valueType: 'date',
@@ -75,7 +75,7 @@ export const DEFAULT_SETTINGS: BacklinkMetadataSettings = {
         {
             id: 'daily-to-books',
             name: 'Daily Notes → Books',
-            sourcePattern: 'Daily Notes/*',
+            sourcePattern: '! Daily Log/*/*',
             targetTag: '#book',
             updateField: 'lastRead',
             valueType: 'date',

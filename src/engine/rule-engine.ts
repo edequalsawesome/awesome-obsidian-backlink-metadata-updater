@@ -22,7 +22,7 @@ export class RuleEngine {
     /**
      * Check if source file matches the rule's pattern
      */
-    private matchesSourcePattern(rule: Rule, sourceFile: TFile): boolean {
+    matchesSourcePattern(rule: Rule, sourceFile: TFile): boolean {
         const pattern = rule.sourcePattern;
         
         // Handle glob-like patterns

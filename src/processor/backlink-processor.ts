@@ -40,14 +40,15 @@ export class BacklinkProcessor {
      */
     async processFile(file: TFile, rules: Rule[], options: PluginOptions): Promise<void> {
         try {
-            if (options.enableLogging) {
-                console.log(`Processing file: ${file.path}`);
-            }
+            console.log(`BacklinkProcessor: Processing file: ${file.path}`);
 
             // Extract outgoing links from the file
             const outgoingLinks = this.extractOutgoingLinks(file);
             
+            console.log(`BacklinkProcessor: Found ${outgoingLinks.length} outgoing links:`, outgoingLinks);
+            
             if (outgoingLinks.length === 0) {
+                console.log(`BacklinkProcessor: No links to process in ${file.path}`);
                 return; // No links to process
             }
 
@@ -56,9 +57,11 @@ export class BacklinkProcessor {
                 const targetFile = this.app.vault.getAbstractFileByPath(linkPath);
                 
                 if (!(targetFile instanceof TFile)) {
+                    console.log(`BacklinkProcessor: Target ${linkPath} is not a valid file`);
                     continue; // Skip if not a valid file
                 }
 
+                console.log(`BacklinkProcessor: Processing link to ${targetFile.path}`);
                 await this.processFileLink(file, targetFile, rules, options);
             }
         } catch (error) {
@@ -78,12 +81,16 @@ export class BacklinkProcessor {
         // Find applicable rules for this file combination
         const applicableRules = this.ruleEngine.findApplicableRules(sourceFile, targetFile, rules);
         
+        console.log(`BacklinkProcessor: Found ${applicableRules.length} applicable rules for ${sourceFile.path} -> ${targetFile.path}`);
+        
         if (applicableRules.length === 0) {
+            console.log(`BacklinkProcessor: No rules apply for ${sourceFile.path} -> ${targetFile.path}`);
             return; // No rules apply
         }
 
         // Process each applicable rule
         for (const rule of applicableRules) {
+            console.log(`BacklinkProcessor: Applying rule ${rule.name} to ${targetFile.path}`);
             await this.applyRule(sourceFile, targetFile, rule, options);
         }
     }

@@ -13,6 +13,8 @@ export default class BacklinkMetadataPlugin extends Plugin {
     async onload() {
         await this.loadSettings();
         
+        console.log('Backlink Metadata Plugin loading with settings:', this.settings);
+        
         // Initialize components
         this.dateExtractor = new DateExtractor(this.app);
         this.ruleEngine = new RuleEngine(this.app);
@@ -20,6 +22,7 @@ export default class BacklinkMetadataPlugin extends Plugin {
         
         // Register event handlers using onLayoutReady for better performance
         this.app.workspace.onLayoutReady(() => {
+            console.log('Workspace layout ready, registering event handlers');
             this.registerEventHandlers();
         });
         
@@ -28,6 +31,8 @@ export default class BacklinkMetadataPlugin extends Plugin {
         
         // Add settings tab
         this.addSettingTab(new BacklinkMetadataSettingTab(this.app, this));
+        
+        console.log('Backlink Metadata Plugin loaded successfully');
     }
 
     onunload() {
@@ -59,13 +64,14 @@ export default class BacklinkMetadataPlugin extends Plugin {
     }
 
     private async handleFileModify(file: TFile) {
+        console.log(`File modified: ${file.path}`);
+        
         if (!this.shouldProcessFile(file)) {
+            console.log(`File ${file.path} should not be processed`);
             return;
         }
 
-        if (this.settings.options.enableLogging) {
-            console.log(`File modified: ${file.path}`);
-        }
+        console.log(`File ${file.path} will be processed`);
 
         // Schedule processing with debouncing
         this.processor.scheduleProcessing(file, this.settings.rules, this.settings.options);
@@ -91,14 +97,20 @@ export default class BacklinkMetadataPlugin extends Plugin {
     private shouldProcessFile(file: TFile): boolean {
         // Only process markdown files
         if (file.extension !== 'md') {
+            console.log(`File ${file.path} is not markdown, skipping`);
             return false;
         }
 
         // Check if any rules might apply to this file as a source
-        return this.settings.rules.some(rule => 
-            rule.enabled && 
-            this.ruleEngine.findApplicableRules(file, file, [rule]).length > 0
-        );
+        const hasApplicableRules = this.settings.rules.some(rule => {
+            const isEnabled = rule.enabled;
+            const matchesAsSource = this.ruleEngine.matchesSourcePattern(rule, file);
+            console.log(`Rule ${rule.name}: enabled=${isEnabled}, matchesAsSource=${matchesAsSource}`);
+            return isEnabled && matchesAsSource;
+        });
+        
+        console.log(`File ${file.path} has applicable rules: ${hasApplicableRules}`);
+        return hasApplicableRules;
     }
 
     private addCommands() {
@@ -288,7 +300,7 @@ class BacklinkMetadataSettingTab extends PluginSettingTab {
             .addButton(button => button
                 .setButtonText('Edit')
                 .onClick(() => {
-                    this.editRule(index);
+                    this.editRule(ruleContainer, index);
                 })
             )
             .addButton(button => button
@@ -317,9 +329,201 @@ class BacklinkMetadataSettingTab extends PluginSettingTab {
         this.display(); // Refresh the display
     }
 
-    private editRule(index: number) {
-        // For now, just show a notice - a full rule editor would be more complex
-        new Notice(`Rule editing not yet implemented. Edit rule ${index + 1} in settings file.`);
+    private editRule(ruleContainer: HTMLElement, index: number) {
+        const rule = this.plugin.settings.rules[index];
+        
+        // Check if already editing this rule
+        if (ruleContainer.querySelector('.rule-editor')) {
+            return;
+        }
+        
+        // Create editor container
+        const editorContainer = ruleContainer.createDiv('rule-editor');
+        editorContainer.style.marginTop = '10px';
+        editorContainer.style.padding = '10px';
+        editorContainer.style.border = '1px solid var(--background-modifier-border)';
+        editorContainer.style.borderRadius = '4px';
+        
+        // Rule Name
+        new Setting(editorContainer)
+            .setName('Rule Name')
+            .addText(text => text
+                .setValue(rule.name)
+                .onChange((value) => {
+                    rule.name = value;
+                })
+            );
+        
+        // Source Pattern
+        new Setting(editorContainer)
+            .setName('Source Pattern')
+            .setDesc('Glob pattern for files that trigger updates (e.g., "Daily Notes/*")')
+            .addText(text => text
+                .setValue(rule.sourcePattern)
+                .onChange((value) => {
+                    rule.sourcePattern = value;
+                })
+            );
+        
+        // Target Type (Tag or Folder)
+        const targetTypeSetting = new Setting(editorContainer)
+            .setName('Target Type')
+            .addDropdown(dropdown => dropdown
+                .addOption('tag', 'Tag')
+                .addOption('folder', 'Folder')
+                .setValue(rule.targetTag ? 'tag' : 'folder')
+                .onChange((value) => {
+                    this.updateTargetType(editorContainer, rule, value);
+                })
+            );
+        
+        // Target Value
+        const targetValueSetting = new Setting(editorContainer)
+            .setName(rule.targetTag ? 'Target Tag' : 'Target Folder')
+            .setDesc(rule.targetTag ? 'Tag to match (e.g., "#movie")' : 'Folder path to match')
+            .addText(text => text
+                .setValue(rule.targetTag || rule.targetFolder || '')
+                .onChange((value) => {
+                    if (rule.targetTag !== undefined) {
+                        rule.targetTag = value;
+                        rule.targetFolder = undefined;
+                    } else {
+                        rule.targetFolder = value;
+                        rule.targetTag = undefined;
+                    }
+                })
+            );
+        
+        // Update Field
+        new Setting(editorContainer)
+            .setName('Update Field')
+            .setDesc('Frontmatter field to update')
+            .addText(text => text
+                .setValue(rule.updateField)
+                .onChange((value) => {
+                    rule.updateField = value;
+                })
+            );
+        
+        // Value Type
+        new Setting(editorContainer)
+            .setName('Value Type')
+            .addDropdown(dropdown => dropdown
+                .addOption('date', 'Date')
+                .addOption('date_and_title', 'Date and Title')
+                .addOption('append_link', 'Append Link')
+                .addOption('append_unique_link', 'Append Unique Link')
+                .addOption('replace_link', 'Replace Link')
+                .setValue(rule.valueType)
+                .onChange((value) => {
+                    rule.valueType = value as any;
+                })
+            );
+        
+        // Priority
+        new Setting(editorContainer)
+            .setName('Priority')
+            .setDesc('Lower numbers = higher priority')
+            .addText(text => text
+                .setValue(rule.priority.toString())
+                .onChange((value) => {
+                    const numValue = parseInt(value) || 1;
+                    rule.priority = numValue;
+                })
+            );
+        
+        // Enabled Toggle
+        new Setting(editorContainer)
+            .setName('Enabled')
+            .addToggle(toggle => toggle
+                .setValue(rule.enabled)
+                .onChange((value) => {
+                    rule.enabled = value;
+                })
+            );
+        
+        // Action buttons
+        const buttonContainer = editorContainer.createDiv();
+        buttonContainer.style.marginTop = '10px';
+        buttonContainer.style.display = 'flex';
+        buttonContainer.style.gap = '10px';
+        
+        const saveButton = buttonContainer.createEl('button', { text: 'Save' });
+        saveButton.onclick = async () => {
+            // Basic validation
+            const validation = this.validateRuleInputs(rule);
+            if (!validation.isValid) {
+                new Notice(`Validation error: ${validation.errors.join(', ')}`);
+                return;
+            }
+            
+            await this.plugin.saveSettings();
+            editorContainer.remove();
+            this.display(); // Refresh to show updated rule
+            new Notice('Rule saved successfully');
+        };
+        
+        const cancelButton = buttonContainer.createEl('button', { text: 'Cancel' });
+        cancelButton.onclick = () => {
+            editorContainer.remove();
+        };
+    }
+    
+    private updateTargetType(editorContainer: HTMLElement, rule: any, targetType: string) {
+        if (targetType === 'tag') {
+            rule.targetTag = rule.targetFolder || '#example';
+            rule.targetFolder = undefined;
+        } else {
+            rule.targetFolder = rule.targetTag?.replace('#', '') || 'Example';
+            rule.targetTag = undefined;
+        }
+        
+        // Update the target value setting
+        const targetValueSetting = editorContainer.querySelector('.setting-item:nth-of-type(4)') as HTMLElement;
+        if (targetValueSetting) {
+            const nameEl = targetValueSetting.querySelector('.setting-item-name');
+            const descEl = targetValueSetting.querySelector('.setting-item-description');
+            const inputEl = targetValueSetting.querySelector('input') as HTMLInputElement;
+            
+            if (nameEl && descEl && inputEl) {
+                nameEl.textContent = targetType === 'tag' ? 'Target Tag' : 'Target Folder';
+                descEl.textContent = targetType === 'tag' ? 'Tag to match (e.g., "#movie")' : 'Folder path to match';
+                inputEl.value = rule.targetTag || rule.targetFolder || '';
+            }
+        }
+    }
+    
+    private validateRuleInputs(rule: any): { isValid: boolean; errors: string[] } {
+        const errors: string[] = [];
+        
+        if (!rule.name || rule.name.trim() === '') {
+            errors.push('Rule name is required');
+        }
+        
+        if (!rule.sourcePattern || rule.sourcePattern.trim() === '') {
+            errors.push('Source pattern is required');
+        }
+        
+        if (!rule.targetTag && !rule.targetFolder) {
+            errors.push('Either target tag or target folder must be specified');
+        }
+        
+        if (rule.targetTag && !rule.targetTag.startsWith('#')) {
+            errors.push('Target tag must start with #');
+        }
+        
+        if (!rule.updateField || rule.updateField.trim() === '') {
+            errors.push('Update field is required');
+        }
+        
+        if (rule.priority < 1) {
+            errors.push('Priority must be at least 1');
+        }
+        
+        return {
+            isValid: errors.length === 0,
+            errors
+        };
     }
 
     private deleteRule(index: number) {
