@@ -228,6 +228,15 @@ export default class BacklinkMetadataPlugin extends Plugin {
                 this.validateRules();
             }
         });
+
+        // Update lastWatched from backlinks command
+        this.addCommand({
+            id: 'update-last-watched-from-backlinks',
+            name: 'Update lastWatched from Daily Log backlinks',
+            callback: async () => {
+                await this.updateLastWatchedFromBacklinks();
+            }
+        });
     }
 
     private async processAllFiles() {
@@ -268,6 +277,98 @@ export default class BacklinkMetadataPlugin extends Plugin {
 
         if (this.settings.options.enableLogging) {
             console.log('Rule validation result:', validation);
+        }
+    }
+
+    private async updateLastWatchedFromBacklinks() {
+        const notice = new Notice('Scanning Daily Log backlinks...', 0);
+        let updatedCount = 0;
+
+        try {
+            // Get all files in the vault
+            const allFiles = this.app.vault.getMarkdownFiles();
+            
+            // Find all Daily Log files (matching the source pattern from rules)
+            const dailyLogFiles: TFile[] = [];
+            for (const rule of this.settings.rules) {
+                if (rule.enabled && rule.updateField === 'lastWatched') {
+                    const matchingFiles = allFiles.filter(file => 
+                        this.ruleEngine.matchesSourcePattern(rule, file)
+                    );
+                    dailyLogFiles.push(...matchingFiles);
+                }
+            }
+
+            // Remove duplicates
+            const uniqueDailyLogFiles = [...new Set(dailyLogFiles)];
+            notice.setMessage(`Found ${uniqueDailyLogFiles.length} Daily Log files, scanning backlinks...`);
+
+            // Map to store the latest date for each linked file
+            const fileToLatestDate = new Map<string, string>();
+
+            // Scan each Daily Log file for backlinks
+            for (const dailyFile of uniqueDailyLogFiles) {
+                try {
+                    const links = this.extractFileLinks(dailyFile);
+                    const dateFromFile = this.dateExtractor.extractDate(dailyFile);
+                    
+                    if (dateFromFile) {
+                        for (const linkPath of links) {
+                            const linkedFile = this.app.vault.getAbstractFileByPath(linkPath);
+                            if (linkedFile instanceof TFile) {
+                                const currentLatest = fileToLatestDate.get(linkedFile.path);
+                                if (!currentLatest || dateFromFile > currentLatest) {
+                                    fileToLatestDate.set(linkedFile.path, dateFromFile);
+                                }
+                            }
+                        }
+                    }
+                } catch (error) {
+                    console.warn(`Error processing Daily Log file ${dailyFile.path}:`, error);
+                }
+            }
+
+            notice.setMessage(`Found backlinks for ${fileToLatestDate.size} files, updating metadata...`);
+
+            // Update lastWatched for each file
+            for (const [filePath, latestDate] of fileToLatestDate) {
+                try {
+                    const file = this.app.vault.getAbstractFileByPath(filePath);
+                    if (file instanceof TFile) {
+                        await this.app.fileManager.processFrontMatter(file, (frontmatter) => {
+                            const currentLastWatched = frontmatter['lastWatched'];
+                            
+                            // Only update if the new date is more recent
+                            if (!currentLastWatched || latestDate > currentLastWatched) {
+                                frontmatter['lastWatched'] = latestDate;
+                                updatedCount++;
+                                
+                                // Add to history if enabled
+                                if (this.settings.options.preserveHistory) {
+                                    if (!frontmatter['watchHistory']) {
+                                        frontmatter['watchHistory'] = [];
+                                    }
+                                    if (Array.isArray(frontmatter['watchHistory'])) {
+                                        if (!frontmatter['watchHistory'].includes(latestDate)) {
+                                            frontmatter['watchHistory'].push(latestDate);
+                                        }
+                                    }
+                                }
+                            }
+                        });
+                    }
+                } catch (error) {
+                    console.warn(`Error updating file ${filePath}:`, error);
+                }
+            }
+
+            notice.hide();
+            new Notice(`Updated lastWatched for ${updatedCount} files based on Daily Log backlinks`);
+            
+        } catch (error) {
+            notice.hide();
+            new Notice(`Error scanning backlinks: ${error.message}`);
+            console.error('Error in updateLastWatchedFromBacklinks:', error);
         }
     }
 
