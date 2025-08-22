@@ -428,9 +428,14 @@ class BacklinkMetadataSettingTab extends PluginSettingTab {
     private displayRule(containerEl: HTMLElement, rule: any, index: number) {
         const ruleContainer = containerEl.createDiv('rule-container');
         
+        // Display source pattern without /* for cleaner UI
+        const displaySource = rule.sourcePattern.endsWith('/*') 
+            ? rule.sourcePattern.slice(0, -2) 
+            : rule.sourcePattern;
+        
         new Setting(ruleContainer)
             .setName(rule.name || `Rule ${index + 1}`)
-            .setDesc(`${rule.sourcePattern} → ${rule.updateField}`)
+            .setDesc(`${displaySource} → ${rule.updateField}`)
             .addButton(button => button
                 .setButtonText('Edit')
                 .onClick(() => {
