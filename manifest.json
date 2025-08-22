@@ -1,10 +1,10 @@
 {
 	"id": "backlink-metadata-updater",
-	"name": "Backlink Metadata Updater",
-	"version": "1.0.9",
+	"name": "Awesome Backlink Metadata Updater",
+	"version": "1.0.11",
 	"minAppVersion": "1.0.0",
 	"description": "Automatically updates note metadata based on backlinks and configurable rules",
 	"author": "edequalsawesome",
-	"authorUrl": "",
+	"authorUrl": "https://edequalaweso.me",
 	"isDesktopOnly": false
 }

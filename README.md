@@ -107,8 +107,8 @@ Type: append_unique_link
 
 ### Building from Source
 ```bash
-git clone <repository>
-cd awesome-obsidian-meta-updater
+git clone https://github.com/edequalsawesome/awesome-obsidian-backlink-metadata-updater
+cd awesome-obsidian-backlink-metadata-updater
 npm install
 npm run build
 ```
