@@ -1,7 +1,7 @@
 {
 	"id": "backlink-metadata-updater",
 	"name": "Backlink Metadata Updater",
-	"version": "1.0.7",
+	"version": "1.0.8",
 	"minAppVersion": "1.0.0",
 	"description": "Automatically updates note metadata based on backlinks and configurable rules",
 	"author": "EdEqualsAwesome",

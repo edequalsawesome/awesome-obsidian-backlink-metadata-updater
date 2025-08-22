@@ -117,6 +117,7 @@ export class BacklinkProcessor {
             // Generate the value to update
             const updateValue = this.generateUpdateValue(context, options);
             if (updateValue === null) {
+                console.log(`BacklinkProcessor: No valid value generated for rule ${rule.name} (${rule.valueType}), skipping update`);
                 return; // No valid value to update
             }
 
@@ -200,20 +201,42 @@ export class BacklinkProcessor {
                     const currentDate = new Date(currentValue);
                     const newDate = new Date(newValue);
                     
-                    console.log(`BacklinkProcessor: Date comparison - current: ${currentValue} (${currentDate.toISOString()}), new: ${newValue} (${newDate.toISOString()})`);
+                    // Check if dates are valid before calling toISOString()
+                    const currentValid = !isNaN(currentDate.getTime());
+                    const newValid = !isNaN(newDate.getTime());
+                    
+                    if (currentValid && newValid) {
+                        console.log(`BacklinkProcessor: Date comparison - current: ${currentValue} (${currentDate.toISOString()}), new: ${newValue} (${newDate.toISOString()})`);
+                    } else {
+                        console.log(`BacklinkProcessor: Date comparison - current: ${currentValue} (valid: ${currentValid}), new: ${newValue} (valid: ${newValid})`);
+                    }
                     
                     // Only update if new date is more recent (or if dates are invalid, use new value)
-                    if (isNaN(currentDate.getTime()) || isNaN(newDate.getTime()) || newDate > currentDate) {
-                        console.log(`BacklinkProcessor: Using new date ${newValue} (more recent or invalid dates)`);
-                        return newValue;
+                    if (!currentValid || !newValid || newDate > currentDate) {
+                        if (newValid) {
+                            console.log(`BacklinkProcessor: Using new date ${newValue} (more recent or current invalid)`);
+                            return newValue;
+                        } else if (currentValid) {
+                            console.log(`BacklinkProcessor: Keeping existing date ${currentValue} (new date invalid)`);
+                            return currentValue;
+                        } else {
+                            console.log(`BacklinkProcessor: Both dates invalid, skipping update`);
+                            return currentValue; // Keep current if both invalid
+                        }
                     } else {
                         console.log(`BacklinkProcessor: Keeping existing date ${currentValue} (more recent than ${newValue})`);
                         // Keep the existing more recent date
                         return currentValue;
                     }
                 }
-                // If no current value or new value is missing, use new value
-                return newValue;
+                // If no current value or new value is missing, use new value only if valid
+                if (newValue) {
+                    const testDate = new Date(newValue);
+                    if (!isNaN(testDate.getTime())) {
+                        return newValue;
+                    }
+                }
+                return currentValue; // Keep existing if new value is invalid
                 
             case 'append_link':
                 if (currentValue === undefined) {
