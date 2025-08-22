@@ -28,11 +28,11 @@ Configure rules to control how metadata gets updated:
 1. Install the plugin
 2. Open Settings → Backlink Metadata Updater
 3. Configure your first rule:
-   - Source Pattern: `Daily Notes/*` (or your daily notes folder)
+   - Source Pattern: `Daily Notes/*` (or any other folder you'd like)
    - Target Tag: `#movie` (or any tag you use)
-   - Update Field: `lastWatched`
+   - Update Field: `lastWatched` (you can set this to be whatever)
    - Value Type: `date`
-4. Start linking to tagged notes from your daily notes!
+4. Start linking to tagged notes from other notes, and get real-time metadata updates!
 
 ## Example Rules
 
