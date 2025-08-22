@@ -656,6 +656,17 @@ class BacklinkMetadataSettingTab extends PluginSettingTab {
                 })
             );
         
+        // Preserve History Toggle
+        new Setting(editorContainer)
+            .setName('Preserve History')
+            .setDesc('Track update history for this rule (overrides global setting)')
+            .addToggle(toggle => toggle
+                .setValue(rule.preserveHistory !== undefined ? rule.preserveHistory : this.plugin.settings.options.preserveHistory)
+                .onChange((value) => {
+                    rule.preserveHistory = value;
+                })
+            );
+        
         // Action buttons
         const buttonContainer = editorContainer.createDiv();
         buttonContainer.style.marginTop = '10px';

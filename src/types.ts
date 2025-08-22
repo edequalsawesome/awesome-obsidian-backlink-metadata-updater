@@ -13,6 +13,7 @@ export interface Rule {
     valueType: ValueType;
     priority: number;
     enabled: boolean;
+    preserveHistory?: boolean;  // Per-rule history tracking
 }
 
 export type ValueType = 

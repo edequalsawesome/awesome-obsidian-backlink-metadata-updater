@@ -178,8 +178,13 @@ export class BacklinkProcessor {
             console.log(`BacklinkProcessor: Processing field ${field}, currentValue:`, currentValue, 'newValue:', newValue);
             
             // Add history tracking if enabled (before updating the field)
-            if (options.preserveHistory && value !== null && value !== undefined) {
-                console.log(`BacklinkProcessor: Adding to history for field ${field}, preserveHistory: ${options.preserveHistory}`);
+            // Check rule-specific setting first, fall back to global setting
+            const shouldPreserveHistory = context.rule.preserveHistory !== undefined 
+                ? context.rule.preserveHistory 
+                : options.preserveHistory;
+                
+            if (shouldPreserveHistory && value !== null && value !== undefined) {
+                console.log(`BacklinkProcessor: Adding to history for field ${field}, preserveHistory: ${shouldPreserveHistory} (rule: ${context.rule.preserveHistory}, global: ${options.preserveHistory})`);
                 this.addToHistory(frontMatter, field, value, context);
             }
             
