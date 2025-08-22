@@ -229,12 +229,12 @@ export default class BacklinkMetadataPlugin extends Plugin {
             }
         });
 
-        // Update lastWatched from backlinks command
+        // Bulk update metadata from backlinks command
         this.addCommand({
-            id: 'update-last-watched-from-backlinks',
-            name: 'Update lastWatched from Daily Log backlinks',
+            id: 'bulk-update-metadata-from-backlinks',
+            name: 'Bulk update metadata from backlinks',
             callback: async () => {
-                await this.updateLastWatchedFromBacklinks();
+                await this.bulkUpdateMetadataFromBacklinks();
             }
         });
     }
@@ -280,95 +280,46 @@ export default class BacklinkMetadataPlugin extends Plugin {
         }
     }
 
-    private async updateLastWatchedFromBacklinks() {
-        const notice = new Notice('Scanning Daily Log backlinks...', 0);
-        let updatedCount = 0;
+    private async bulkUpdateMetadataFromBacklinks() {
+        const notice = new Notice('Scanning backlinks from source files...', 0);
 
         try {
             // Get all files in the vault
             const allFiles = this.app.vault.getMarkdownFiles();
             
-            // Find all Daily Log files (matching the source pattern from rules)
-            const dailyLogFiles: TFile[] = [];
+            // Find all source files (matching the source pattern from rules)
+            const sourceFiles: TFile[] = [];
             for (const rule of this.settings.rules) {
-                if (rule.enabled && rule.updateField === 'lastWatched') {
+                if (rule.enabled) {
                     const matchingFiles = allFiles.filter(file => 
                         this.ruleEngine.matchesSourcePattern(rule, file)
                     );
-                    dailyLogFiles.push(...matchingFiles);
+                    sourceFiles.push(...matchingFiles);
                 }
             }
 
             // Remove duplicates
-            const uniqueDailyLogFiles = [...new Set(dailyLogFiles)];
-            notice.setMessage(`Found ${uniqueDailyLogFiles.length} Daily Log files, scanning backlinks...`);
+            const uniqueSourceFiles = [...new Set(sourceFiles)];
+            notice.setMessage(`Found ${uniqueSourceFiles.length} source files, scanning backlinks...`);
 
-            // Map to store the latest date for each linked file
-            const fileToLatestDate = new Map<string, string>();
-
-            // Scan each Daily Log file for backlinks
-            for (const dailyFile of uniqueDailyLogFiles) {
+            // Process files using the existing processor
+            let processedCount = 0;
+            for (const sourceFile of uniqueSourceFiles) {
                 try {
-                    const links = this.extractFileLinks(dailyFile);
-                    const dateFromFile = this.dateExtractor.extractDate(dailyFile);
-                    
-                    if (dateFromFile) {
-                        for (const linkPath of links) {
-                            const linkedFile = this.app.vault.getAbstractFileByPath(linkPath);
-                            if (linkedFile instanceof TFile) {
-                                const currentLatest = fileToLatestDate.get(linkedFile.path);
-                                if (!currentLatest || dateFromFile > currentLatest) {
-                                    fileToLatestDate.set(linkedFile.path, dateFromFile);
-                                }
-                            }
-                        }
-                    }
+                    await this.processor.processFile(sourceFile, this.settings.rules, this.settings.options);
+                    processedCount++;
                 } catch (error) {
-                    console.warn(`Error processing Daily Log file ${dailyFile.path}:`, error);
-                }
-            }
-
-            notice.setMessage(`Found backlinks for ${fileToLatestDate.size} files, updating metadata...`);
-
-            // Update lastWatched for each file
-            for (const [filePath, latestDate] of fileToLatestDate) {
-                try {
-                    const file = this.app.vault.getAbstractFileByPath(filePath);
-                    if (file instanceof TFile) {
-                        await this.app.fileManager.processFrontMatter(file, (frontmatter) => {
-                            const currentLastWatched = frontmatter['lastWatched'];
-                            
-                            // Only update if the new date is more recent
-                            if (!currentLastWatched || latestDate > currentLastWatched) {
-                                frontmatter['lastWatched'] = latestDate;
-                                updatedCount++;
-                                
-                                // Add to history if enabled
-                                if (this.settings.options.preserveHistory) {
-                                    if (!frontmatter['watchHistory']) {
-                                        frontmatter['watchHistory'] = [];
-                                    }
-                                    if (Array.isArray(frontmatter['watchHistory'])) {
-                                        if (!frontmatter['watchHistory'].includes(latestDate)) {
-                                            frontmatter['watchHistory'].push(latestDate);
-                                        }
-                                    }
-                                }
-                            }
-                        });
-                    }
-                } catch (error) {
-                    console.warn(`Error updating file ${filePath}:`, error);
+                    console.warn(`Error processing source file ${sourceFile.path}:`, error);
                 }
             }
 
             notice.hide();
-            new Notice(`Updated lastWatched for ${updatedCount} files based on Daily Log backlinks`);
+            new Notice(`Bulk update complete: processed ${processedCount} source files`);
             
         } catch (error) {
             notice.hide();
-            new Notice(`Error scanning backlinks: ${error.message}`);
-            console.error('Error in updateLastWatchedFromBacklinks:', error);
+            new Notice(`Error during bulk update: ${error.message}`);
+            console.error('Error in bulkUpdateMetadataFromBacklinks:', error);
         }
     }
 
@@ -542,9 +493,15 @@ class BacklinkMetadataSettingTab extends PluginSettingTab {
             .setName('Source Pattern')
             .setDesc('Glob pattern for files that trigger updates (click to browse folders)')
             .addText(text => {
+                // Display folder path without /* for better UX
+                const displayValue = rule.sourcePattern.endsWith('/*') 
+                    ? rule.sourcePattern.slice(0, -2) 
+                    : rule.sourcePattern;
+                
                 const textEl = text
-                    .setValue(rule.sourcePattern)
+                    .setValue(displayValue)
                     .onChange((value) => {
+                        // If user manually types, preserve their input
                         rule.sourcePattern = value;
                     });
                 
@@ -579,8 +536,14 @@ class BacklinkMetadataSettingTab extends PluginSettingTab {
             .setName(rule.targetTag ? 'Target Tag' : 'Target Folder')
             .setDesc(rule.targetTag ? 'Tag to match (e.g., "#movie")' : 'Folder path to match (click to browse folders)')
             .addText(text => {
+                // Display folder path without /* for better UX
+                let displayValue = rule.targetTag || rule.targetFolder || '';
+                if (!rule.targetTag && displayValue.endsWith('/*')) {
+                    displayValue = displayValue.slice(0, -2);
+                }
+                
                 const textComponent = text
-                    .setValue(rule.targetTag || rule.targetFolder || '')
+                    .setValue(displayValue)
                     .onChange((value) => {
                         if (rule.targetTag !== undefined) {
                             rule.targetTag = value;
