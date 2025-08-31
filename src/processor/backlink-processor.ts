@@ -323,16 +323,59 @@ export class BacklinkProcessor {
      */
     private extractOutgoingLinks(file: TFile): string[] {
         const cache = this.app.metadataCache.getFileCache(file);
-        if (!cache?.links) {
-            return [];
-        }
-
         const links: string[] = [];
         
-        for (const link of cache.links) {
-            const resolvedFile = this.app.metadataCache.getFirstLinkpathDest(link.link, file.path);
-            if (resolvedFile && resolvedFile instanceof TFile) {
-                links.push(resolvedFile.path);
+        // Extract links from body content
+        if (cache?.links) {
+            for (const link of cache.links) {
+                const resolvedFile = this.app.metadataCache.getFirstLinkpathDest(link.link, file.path);
+                if (resolvedFile && resolvedFile instanceof TFile) {
+                    links.push(resolvedFile.path);
+                }
+            }
+        }
+        
+        // Extract links from frontmatter
+        if (cache?.frontmatter) {
+            // Check frontmatterLinks if available (Obsidian 1.4+)
+            if (cache.frontmatterLinks) {
+                for (const link of cache.frontmatterLinks) {
+                    const resolvedFile = this.app.metadataCache.getFirstLinkpathDest(link.link, file.path);
+                    if (resolvedFile && resolvedFile instanceof TFile) {
+                        links.push(resolvedFile.path);
+                    }
+                }
+            } else {
+                // Fallback: manually parse common frontmatter fields that might contain links
+                const frontmatter = cache.frontmatter;
+                const linkPattern = /\[\[([^\]]+)\]\]/g;
+                
+                // Check common fields that might contain links
+                const fieldsToCheck = ['attendees', 'attendee', 'participants', 'participant', 
+                                       'people', 'person', 'with', 'employee', 'employees',
+                                       'team', 'members', 'related', 'links', 'notes'];
+                
+                for (const field of fieldsToCheck) {
+                    const value = frontmatter[field];
+                    if (value) {
+                        // Handle both string and array values
+                        const values = Array.isArray(value) ? value : [value];
+                        
+                        for (const val of values) {
+                            if (typeof val === 'string') {
+                                // Extract wikilinks from the string
+                                let match;
+                                while ((match = linkPattern.exec(val)) !== null) {
+                                    const linkPath = match[1].split('|')[0]; // Handle aliased links
+                                    const resolvedFile = this.app.metadataCache.getFirstLinkpathDest(linkPath, file.path);
+                                    if (resolvedFile && resolvedFile instanceof TFile) {
+                                        links.push(resolvedFile.path);
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
             }
         }
         
