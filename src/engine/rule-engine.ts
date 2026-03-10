@@ -73,9 +73,15 @@ export class RuleEngine {
 
         // Check target folder if specified
         if (rule.targetFolder) {
-            const matchesFolder = this.matchesGlobPattern(rule.targetFolder, targetFile.path);
+            // Target folder patterns ending with /* should match recursively (/**)
+            // since "target folder" semantically means "any file under this folder tree"
+            let folderPattern = rule.targetFolder;
+            if (folderPattern.endsWith('/*') && !folderPattern.endsWith('/**')) {
+                folderPattern = folderPattern.slice(0, -2) + '/**';
+            }
+            const matchesFolder = this.matchesGlobPattern(folderPattern, targetFile.path);
             if (this.enableLogging) {
-                console.log(`RuleEngine: Target file ${targetFile.path} matches folder pattern ${rule.targetFolder}: ${matchesFolder}`);
+                console.log(`RuleEngine: Target file ${targetFile.path} matches folder pattern ${rule.targetFolder} (resolved: ${folderPattern}): ${matchesFolder}`);
             }
             return matchesFolder;
         }
