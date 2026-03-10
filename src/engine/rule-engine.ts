@@ -32,10 +32,15 @@ export class RuleEngine {
      * Check if source file matches the rule's pattern
      */
     matchesSourcePattern(rule: Rule, sourceFile: TFile): boolean {
-        const pattern = rule.sourcePattern;
+        let pattern = rule.sourcePattern;
 
         // Handle glob-like patterns
         if (pattern.includes('*')) {
+            // Source patterns ending with /* should match recursively (/**)
+            // since the folder picker appends /* but users expect recursive matching
+            if (pattern.endsWith('/*') && !pattern.endsWith('/**')) {
+                pattern = pattern.slice(0, -2) + '/**';
+            }
             return this.matchesGlobPattern(pattern, sourceFile.path);
         }
 
