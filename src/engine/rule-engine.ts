@@ -3,9 +3,18 @@ import { Rule, ValidationResult, ProcessingContext } from '../types';
 
 export class RuleEngine {
     private app: any;
+    private regexCache: Map<string, RegExp> = new Map();
+    private enableLogging: boolean = false;
 
     constructor(app: any) {
         this.app = app;
+    }
+
+    /**
+     * Set logging state from plugin options.
+     */
+    setLogging(enabled: boolean): void {
+        this.enableLogging = enabled;
     }
 
     /**
@@ -16,7 +25,7 @@ export class RuleEngine {
             .filter(rule => rule.enabled)
             .filter(rule => this.matchesSourcePattern(rule, sourceFile))
             .filter(rule => this.matchesTargetCriteria(rule, targetFile))
-            .sort((a, b) => a.priority - b.priority); // Higher priority first
+            .sort((a, b) => a.priority - b.priority); // Lower priority number = higher priority, processed first
     }
 
     /**
@@ -24,28 +33,28 @@ export class RuleEngine {
      */
     matchesSourcePattern(rule: Rule, sourceFile: TFile): boolean {
         const pattern = rule.sourcePattern;
-        
+
         // Handle glob-like patterns
         if (pattern.includes('*')) {
             return this.matchesGlobPattern(pattern, sourceFile.path);
         }
-        
+
         // Exact path match
         if (pattern === sourceFile.path) {
             return true;
         }
-        
+
         // Folder match
         if (pattern.endsWith('/') && sourceFile.path.startsWith(pattern)) {
             return true;
         }
-        
+
         // Parent folder match
         const parentPath = sourceFile.parent?.path || '';
         if (parentPath === pattern) {
             return true;
         }
-        
+
         return false;
     }
 
@@ -56,19 +65,25 @@ export class RuleEngine {
         // Check target tag if specified
         if (rule.targetTag) {
             const hasTag = this.fileHasTag(targetFile, rule.targetTag);
-            console.log(`RuleEngine: Target file ${targetFile.path} has tag ${rule.targetTag}: ${hasTag}`);
+            if (this.enableLogging) {
+                console.log(`RuleEngine: Target file ${targetFile.path} has tag ${rule.targetTag}: ${hasTag}`);
+            }
             return hasTag;
         }
-        
+
         // Check target folder if specified
         if (rule.targetFolder) {
             const matchesFolder = this.matchesGlobPattern(rule.targetFolder, targetFile.path);
-            console.log(`RuleEngine: Target file ${targetFile.path} matches folder pattern ${rule.targetFolder}: ${matchesFolder}`);
+            if (this.enableLogging) {
+                console.log(`RuleEngine: Target file ${targetFile.path} matches folder pattern ${rule.targetFolder}: ${matchesFolder}`);
+            }
             return matchesFolder;
         }
-        
+
         // If no specific target criteria, match all files
-        console.log(`RuleEngine: No target criteria specified, matching all files for ${targetFile.path}`);
+        if (this.enableLogging) {
+            console.log(`RuleEngine: No target criteria specified, matching all files for ${targetFile.path}`);
+        }
         return true;
     }
 
@@ -77,61 +92,66 @@ export class RuleEngine {
      */
     private fileHasTag(file: TFile, tag: string): boolean {
         const cache = this.app.metadataCache.getFileCache(file);
-        console.log(`RuleEngine: Cache for ${file.path}:`, cache);
-        
+
         if (!cache) {
-            console.log(`RuleEngine: No cache found for ${file.path}`);
             return false;
         }
 
         // Remove # from tag if present
         const cleanTag = tag.startsWith('#') ? tag.slice(1) : tag;
-        console.log(`RuleEngine: Looking for tag '${cleanTag}' in ${file.path}`);
-        
+
         // Check frontmatter tags
         if (cache.frontmatter?.tags) {
-            const frontmatterTags = Array.isArray(cache.frontmatter.tags) 
-                ? cache.frontmatter.tags 
+            const frontmatterTags = Array.isArray(cache.frontmatter.tags)
+                ? cache.frontmatter.tags
                 : [cache.frontmatter.tags];
-            
-            console.log(`RuleEngine: Frontmatter tags for ${file.path}:`, frontmatterTags);
-            
+
             if (frontmatterTags.some((t: string) => t === cleanTag)) {
-                console.log(`RuleEngine: Found matching tag '${cleanTag}' in frontmatter`);
                 return true;
             }
         }
-        
+
         // Check inline tags
         if (cache.tags) {
-            console.log(`RuleEngine: Inline tags for ${file.path}:`, cache.tags);
-            const hasInlineTag = cache.tags.some((tagCache: any) => 
+            const hasInlineTag = cache.tags.some((tagCache: any) =>
                 tagCache.tag === `#${cleanTag}` || tagCache.tag === cleanTag
             );
             if (hasInlineTag) {
-                console.log(`RuleEngine: Found matching tag '${cleanTag}' in inline tags`);
                 return true;
             }
         }
-        
-        console.log(`RuleEngine: No matching tag '${cleanTag}' found in ${file.path}`);
+
         return false;
     }
 
     /**
-     * Simple glob pattern matching
+     * Glob pattern matching with regex caching.
+     * Single * matches within a path segment (no /), ** matches across segments.
      */
     private matchesGlobPattern(pattern: string, path: string): boolean {
-        // Convert glob pattern to regex
-        const regexPattern = pattern
-            .replace(/\//g, '\\/')  // Escape forward slashes
-            .replace(/\./g, '\\.')  // Escape dots
-            .replace(/\*/g, '.*')   // Replace * with .*
-            .replace(/\?/g, '.')    // Replace ? with .
-            + '$';                  // Anchor at end
-        
-        const regex = new RegExp(regexPattern);
+        let regex = this.regexCache.get(pattern);
+        if (!regex) {
+            const regexPattern = '^' + pattern
+                .replace(/[.+^${}()|[\]\\]/g, '\\$&')  // Escape regex special chars (except * and ?)
+                .replace(/\//g, '\\/')                    // Escape forward slashes
+                .replace(/\*\*/g, '##GLOBSTAR##')         // Temporarily replace **
+                .replace(/\*/g, '[^/]*')                  // Single * = within one path segment
+                .replace(/##GLOBSTAR##/g, '.*')           // ** = across path segments
+                .replace(/\?/g, '[^/]')                   // ? = single non-slash char
+                + '$';
+
+            regex = new RegExp(regexPattern);
+            this.regexCache.set(pattern, regex);
+        }
+
         return regex.test(path);
+    }
+
+    /**
+     * Clear the regex cache (call when rules change).
+     */
+    clearRegexCache(): void {
+        this.regexCache.clear();
     }
 
     /**
@@ -145,15 +165,15 @@ export class RuleEngine {
         if (!rule.id) {
             errors.push('Rule ID is required');
         }
-        
+
         if (!rule.name) {
             errors.push('Rule name is required');
         }
-        
+
         if (!rule.sourcePattern) {
             errors.push('Source pattern is required');
         }
-        
+
         if (!rule.updateField) {
             errors.push('Update field is required');
         }
@@ -168,7 +188,7 @@ export class RuleEngine {
             try {
                 this.matchesGlobPattern(rule.sourcePattern, 'test/path');
             } catch (e) {
-                errors.push(`Invalid source pattern: ${e.message}`);
+                errors.push(`Invalid source pattern: ${e instanceof Error ? e.message : String(e)}`);
             }
         }
 
@@ -177,18 +197,18 @@ export class RuleEngine {
             try {
                 this.matchesGlobPattern(rule.targetFolder, 'test/path');
             } catch (e) {
-                errors.push(`Invalid target folder pattern: ${e.message}`);
+                errors.push(`Invalid target folder pattern: ${e instanceof Error ? e.message : String(e)}`);
             }
         }
 
-        // Validate field name (should be valid YAML key)
-        if (rule.updateField && !/^[a-zA-Z_][a-zA-Z0-9_]*$/.test(rule.updateField)) {
-            errors.push('Update field must be a valid identifier (letters, numbers, underscore)');
+        // Validate field name (valid YAML key — allows hyphens)
+        if (rule.updateField && !/^[a-zA-Z_][a-zA-Z0-9_-]*$/.test(rule.updateField)) {
+            errors.push('Update field must be a valid identifier (letters, numbers, underscore, hyphen)');
         }
 
         // Validate priority
-        if (rule.priority < 0) {
-            errors.push('Priority must be non-negative');
+        if (rule.priority < 1) {
+            errors.push('Priority must be at least 1');
         }
 
         return {
@@ -217,7 +237,7 @@ export class RuleEngine {
             for (let j = i + 1; j < rules.length; j++) {
                 const rule1 = rules[i];
                 const rule2 = rules[j];
-                
+
                 if (this.rulesConflict(rule1, rule2)) {
                     warnings.push(
                         `Rules "${rule1.name}" and "${rule2.name}" may conflict ` +
@@ -242,17 +262,17 @@ export class RuleEngine {
         if (rule1.sourcePattern !== rule2.sourcePattern) {
             return false;
         }
-        
+
         // Same target criteria
         if (rule1.targetTag !== rule2.targetTag || rule1.targetFolder !== rule2.targetFolder) {
             return false;
         }
-        
+
         // Same update field
         if (rule1.updateField !== rule2.updateField) {
             return false;
         }
-        
+
         return true;
     }
 
@@ -269,7 +289,7 @@ export class RuleEngine {
      */
     getFilesWithTag(tag: string): TFile[] {
         const cleanTag = tag.startsWith('#') ? tag.slice(1) : tag;
-        
+
         return this.app.vault.getMarkdownFiles()
             .filter((file: TFile) => this.fileHasTag(file, cleanTag));
     }

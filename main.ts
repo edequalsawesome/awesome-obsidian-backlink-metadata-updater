@@ -1,5 +1,5 @@
-import { App, TFile, Plugin, Notice, PluginSettingTab, Setting, FuzzySuggestModal, TFolder } from 'obsidian';
-import { BacklinkMetadataSettings, DEFAULT_SETTINGS } from './src/types';
+import { App, TFile, Plugin, Notice, PluginSettingTab, Setting, FuzzySuggestModal, TFolder, Modal } from 'obsidian';
+import { BacklinkMetadataSettings, DEFAULT_SETTINGS, Rule } from './src/types';
 import { DateExtractor } from './src/utils/date-extractor';
 import { RuleEngine } from './src/engine/rule-engine';
 import { BacklinkProcessor } from './src/processor/backlink-processor';
@@ -9,54 +9,56 @@ export default class BacklinkMetadataPlugin extends Plugin {
     private dateExtractor: DateExtractor;
     private ruleEngine: RuleEngine;
     private processor: BacklinkProcessor;
-    private fileContentCache: Map<string, { content: string; links: string[] }> = new Map();
+    private fileContentCache: Map<string, { contentHash: number; links: string[] }> = new Map();
 
     async onload() {
         await this.loadSettings();
-        
-        console.log('Backlink Metadata Plugin loading with settings:', this.settings);
-        
-        // Initialize components
-        this.dateExtractor = new DateExtractor(this.app);
+
+        // Initialize components with settings
+        this.dateExtractor = new DateExtractor(this.app, this.settings.options.dateFormat);
         this.ruleEngine = new RuleEngine(this.app);
+        this.ruleEngine.setLogging(this.settings.options.enableLogging);
         this.processor = new BacklinkProcessor(this.app, this.dateExtractor, this.ruleEngine);
-        
+
         // Register event handlers using onLayoutReady for better performance
         this.app.workspace.onLayoutReady(() => {
-            console.log('Workspace layout ready, registering event handlers');
             this.registerEventHandlers();
         });
-        
+
         // Add commands
         this.addCommands();
-        
+
         // Add settings tab
         this.addSettingTab(new BacklinkMetadataSettingTab(this.app, this));
-        
-        console.log('Backlink Metadata Plugin loaded successfully');
     }
 
     onunload() {
-        // Cancel any pending processing
         this.processor?.cancelAllProcessing();
+        this.fileContentCache.clear();
+    }
+
+    /**
+     * Sync component settings after a settings change.
+     */
+    private syncComponentSettings(): void {
+        this.dateExtractor?.setDateFormat(this.settings.options.dateFormat);
+        this.ruleEngine?.setLogging(this.settings.options.enableLogging);
+        this.ruleEngine?.clearRegexCache();
     }
 
     private registerEventHandlers() {
-        // File modification handler
         this.registerEvent(
             this.app.vault.on('modify', (file: TFile) => {
                 this.handleFileModify(file);
             })
         );
 
-        // File rename handler  
         this.registerEvent(
             this.app.vault.on('rename', (file: TFile, oldPath: string) => {
                 this.handleFileRename(file, oldPath);
             })
         );
 
-        // File delete handler
         this.registerEvent(
             this.app.vault.on('delete', (file: TFile) => {
                 this.handleFileDelete(file);
@@ -64,132 +66,66 @@ export default class BacklinkMetadataPlugin extends Plugin {
         );
     }
 
+    /**
+     * Simple string hash for content comparison (avoids storing full content).
+     */
+    private hashContent(content: string): number {
+        let hash = 0;
+        for (let i = 0; i < content.length; i++) {
+            const chr = content.charCodeAt(i);
+            hash = ((hash << 5) - hash) + chr;
+            hash |= 0; // Convert to 32bit integer
+        }
+        return hash;
+    }
+
     private async handleFileModify(file: TFile) {
-        console.log(`File modified: ${file.path}`);
-        
         if (!this.shouldProcessFile(file)) {
-            console.log(`File ${file.path} should not be processed`);
             return;
         }
 
-        // Get current content and links
+        // Use processor's extractOutgoingLinks to avoid duplicated logic
         const currentContent = await this.app.vault.read(file);
-        const currentLinks = this.extractFileLinks(file);
-        
-        // Get cached content and links
+        const currentHash = this.hashContent(currentContent);
+        const currentLinks = this.processor.extractOutgoingLinks(file);
+
         const cached = this.fileContentCache.get(file.path);
-        
-        // Check if content or links actually changed
+
         if (cached) {
-            const contentChanged = cached.content !== currentContent;
+            const contentChanged = cached.contentHash !== currentHash;
             const linksChanged = !this.arraysEqual(cached.links, currentLinks);
-            
-            console.log(`File ${file.path}: contentChanged=${contentChanged}, linksChanged=${linksChanged}`);
-            
-            // Only process if content changed AND links are involved
+
             if (!contentChanged) {
-                console.log(`File ${file.path}: Only metadata changed, skipping processing`);
                 return;
             }
-            
+
             if (!linksChanged && currentLinks.length === 0) {
-                console.log(`File ${file.path}: Content changed but no links present, skipping processing`);
                 return;
             }
-            
-            // If links changed, we want to know which ones are new
+
             if (linksChanged) {
                 const newLinks = currentLinks.filter(link => !cached.links.includes(link));
                 const removedLinks = cached.links.filter(link => !currentLinks.includes(link));
-                
-                console.log(`File ${file.path}: New links: ${newLinks.length}, Removed links: ${removedLinks.length}`);
-                
+
                 if (newLinks.length === 0 && removedLinks.length === 0) {
-                    console.log(`File ${file.path}: Link positions changed but no new/removed links, skipping processing`);
-                    // Update cache but don't process
-                    this.fileContentCache.set(file.path, { content: currentContent, links: currentLinks });
+                    this.fileContentCache.set(file.path, { contentHash: currentHash, links: currentLinks });
                     return;
                 }
             }
         }
-        
-        // Update cache
-        this.fileContentCache.set(file.path, { content: currentContent, links: currentLinks });
-        
-        console.log(`File ${file.path} will be processed`);
+
+        this.fileContentCache.set(file.path, { contentHash: currentHash, links: currentLinks });
 
         // Schedule processing with debouncing
         this.processor.scheduleProcessing(file, this.settings.rules, this.settings.options);
     }
 
-    private extractFileLinks(file: TFile): string[] {
-        const cache = this.app.metadataCache.getFileCache(file);
-        const links: string[] = [];
-        
-        // Extract links from body content
-        if (cache?.links) {
-            for (const link of cache.links) {
-                const resolvedFile = this.app.metadataCache.getFirstLinkpathDest(link.link, file.path);
-                if (resolvedFile && resolvedFile instanceof TFile) {
-                    links.push(resolvedFile.path);
-                }
-            }
-        }
-        
-        // Extract links from frontmatter
-        if (cache?.frontmatter) {
-            // Check frontmatterLinks if available (Obsidian 1.4+)
-            if (cache.frontmatterLinks) {
-                for (const link of cache.frontmatterLinks) {
-                    const resolvedFile = this.app.metadataCache.getFirstLinkpathDest(link.link, file.path);
-                    if (resolvedFile && resolvedFile instanceof TFile) {
-                        links.push(resolvedFile.path);
-                    }
-                }
-            } else {
-                // Fallback: manually parse common frontmatter fields that might contain links
-                const frontmatter = cache.frontmatter;
-                const linkPattern = /\[\[([^\]]+)\]\]/g;
-                
-                // Check common fields that might contain links
-                const fieldsToCheck = ['attendees', 'attendee', 'participants', 'participant', 
-                                       'people', 'person', 'with', 'employee', 'employees',
-                                       'team', 'members', 'related', 'links', 'notes'];
-                
-                for (const field of fieldsToCheck) {
-                    const value = frontmatter[field];
-                    if (value) {
-                        // Handle both string and array values
-                        const values = Array.isArray(value) ? value : [value];
-                        
-                        for (const val of values) {
-                            if (typeof val === 'string') {
-                                // Extract wikilinks from the string
-                                let match;
-                                while ((match = linkPattern.exec(val)) !== null) {
-                                    const linkPath = match[1].split('|')[0]; // Handle aliased links
-                                    const resolvedFile = this.app.metadataCache.getFirstLinkpathDest(linkPath, file.path);
-                                    if (resolvedFile && resolvedFile instanceof TFile) {
-                                        links.push(resolvedFile.path);
-                                    }
-                                }
-                            }
-                        }
-                    }
-                }
-            }
-        }
-        
-        return [...new Set(links)]; // Remove duplicates and sort for consistent comparison
-    }
-
     private arraysEqual(a: string[], b: string[]): boolean {
         if (a.length !== b.length) return false;
-        
-        // Sort both arrays for consistent comparison
+
         const sortedA = [...a].sort();
         const sortedB = [...b].sort();
-        
+
         return sortedA.every((val, index) => val === sortedB[index]);
     }
 
@@ -198,15 +134,14 @@ export default class BacklinkMetadataPlugin extends Plugin {
             console.log(`File renamed: ${oldPath} -> ${file.path}`);
         }
 
-        // Update cache with new path
         const cached = this.fileContentCache.get(oldPath);
         if (cached) {
             this.fileContentCache.delete(oldPath);
             this.fileContentCache.set(file.path, cached);
         }
 
-        // Process the renamed file
-        await this.processor.processFile(file, this.settings.rules, this.settings.options);
+        // Route through debounce for consistency (avoids cascade on bulk renames)
+        this.processor.scheduleProcessing(file, this.settings.rules, this.settings.options);
     }
 
     private async handleFileDelete(file: TFile) {
@@ -214,33 +149,20 @@ export default class BacklinkMetadataPlugin extends Plugin {
             console.log(`File deleted: ${file.path}`);
         }
 
-        // Clean up cache for deleted file
         this.fileContentCache.delete(file.path);
-
-        // Note: Could add cleanup logic for removing metadata from other files if needed
     }
 
     private shouldProcessFile(file: TFile): boolean {
-        // Only process markdown files
         if (file.extension !== 'md') {
-            console.log(`File ${file.path} is not markdown, skipping`);
             return false;
         }
 
-        // Check if any rules might apply to this file as a source
-        const hasApplicableRules = this.settings.rules.some(rule => {
-            const isEnabled = rule.enabled;
-            const matchesAsSource = this.ruleEngine.matchesSourcePattern(rule, file);
-            console.log(`Rule ${rule.name}: enabled=${isEnabled}, matchesAsSource=${matchesAsSource}`);
-            return isEnabled && matchesAsSource;
+        return this.settings.rules.some(rule => {
+            return rule.enabled && this.ruleEngine.matchesSourcePattern(rule, file);
         });
-        
-        console.log(`File ${file.path} has applicable rules: ${hasApplicableRules}`);
-        return hasApplicableRules;
     }
 
     private addCommands() {
-        // Process all files command
         this.addCommand({
             id: 'process-all-files',
             name: 'Process all files for backlink metadata',
@@ -249,7 +171,6 @@ export default class BacklinkMetadataPlugin extends Plugin {
             }
         });
 
-        // Process current file command
         this.addCommand({
             id: 'process-current-file',
             name: 'Process current file for backlink metadata',
@@ -264,7 +185,6 @@ export default class BacklinkMetadataPlugin extends Plugin {
             }
         });
 
-        // Validate rules command
         this.addCommand({
             id: 'validate-rules',
             name: 'Validate metadata update rules',
@@ -273,7 +193,6 @@ export default class BacklinkMetadataPlugin extends Plugin {
             }
         });
 
-        // Bulk update metadata from backlinks command
         this.addCommand({
             id: 'bulk-update-metadata-from-backlinks',
             name: 'Bulk update metadata from backlinks',
@@ -289,26 +208,26 @@ export default class BacklinkMetadataPlugin extends Plugin {
 
         try {
             await this.processor.processAllFiles(
-                this.settings.rules, 
+                this.settings.rules,
                 this.settings.options,
                 (current, totalFiles) => {
                     processed = current;
                     notice.setMessage(`Processing files: ${current}/${totalFiles}`);
                 }
             );
-            
+
             notice.hide();
             new Notice(`Successfully processed ${processed} files`);
         } catch (error) {
             notice.hide();
-            new Notice(`Error processing files: ${error.message}`);
+            new Notice(`Error processing files: ${error instanceof Error ? error.message : String(error)}`);
             console.error('Error processing all files:', error);
         }
     }
 
     private validateRules() {
         const validation = this.ruleEngine.validateRuleSet(this.settings.rules);
-        
+
         if (validation.isValid) {
             new Notice('All rules are valid');
         } else {
@@ -328,26 +247,28 @@ export default class BacklinkMetadataPlugin extends Plugin {
         const notice = new Notice('Scanning backlinks from source files...', 0);
 
         try {
-            // Get all files in the vault
             const allFiles = this.app.vault.getMarkdownFiles();
-            
-            // Find all source files (matching the source pattern from rules)
-            const sourceFiles: TFile[] = [];
+
+            // Deduplicate by path, not object reference
+            const seenPaths = new Set<string>();
+            const uniqueSourceFiles: TFile[] = [];
+
             for (const rule of this.settings.rules) {
                 if (rule.enabled) {
-                    const matchingFiles = allFiles.filter(file => 
-                        this.ruleEngine.matchesSourcePattern(rule, file)
-                    );
-                    sourceFiles.push(...matchingFiles);
+                    for (const file of allFiles) {
+                        if (!seenPaths.has(file.path) && this.ruleEngine.matchesSourcePattern(rule, file)) {
+                            seenPaths.add(file.path);
+                            uniqueSourceFiles.push(file);
+                        }
+                    }
                 }
             }
 
-            // Remove duplicates
-            const uniqueSourceFiles = [...new Set(sourceFiles)];
             notice.setMessage(`Found ${uniqueSourceFiles.length} source files, scanning backlinks...`);
 
-            // Process files using the existing processor
             let processedCount = 0;
+            const BATCH_SIZE = 20;
+
             for (const sourceFile of uniqueSourceFiles) {
                 try {
                     await this.processor.processFile(sourceFile, this.settings.rules, this.settings.options);
@@ -355,14 +276,20 @@ export default class BacklinkMetadataPlugin extends Plugin {
                 } catch (error) {
                     console.warn(`Error processing source file ${sourceFile.path}:`, error);
                 }
+
+                // Yield to UI every batch
+                if (processedCount % BATCH_SIZE === 0) {
+                    notice.setMessage(`Processing: ${processedCount}/${uniqueSourceFiles.length} source files...`);
+                    await new Promise(resolve => setTimeout(resolve, 0));
+                }
             }
 
             notice.hide();
             new Notice(`Bulk update complete: processed ${processedCount} source files`);
-            
+
         } catch (error) {
             notice.hide();
-            new Notice(`Error during bulk update: ${error.message}`);
+            new Notice(`Error during bulk update: ${error instanceof Error ? error.message : String(error)}`);
             console.error('Error in bulkUpdateMetadataFromBacklinks:', error);
         }
     }
@@ -373,6 +300,7 @@ export default class BacklinkMetadataPlugin extends Plugin {
 
     async saveSettings() {
         await this.saveData(this.settings);
+        this.syncComponentSettings();
     }
 }
 
@@ -427,16 +355,21 @@ class BacklinkMetadataSettingTab extends PluginSettingTab {
 
         new Setting(containerEl)
             .setName('Debounce delay (ms)')
-            .setDesc('Wait time before processing file changes')
-            .addText(text => text
-                .setPlaceholder('1000')
-                .setValue(this.plugin.settings.options.debounceMs.toString())
-                .onChange(async (value) => {
-                    const numValue = parseInt(value) || 1000;
-                    this.plugin.settings.options.debounceMs = numValue;
-                    await this.plugin.saveSettings();
-                })
-            );
+            .setDesc('Wait time before processing file changes (100–30000)')
+            .addText(text => {
+                text.setPlaceholder('1000')
+                    .setValue(this.plugin.settings.options.debounceMs.toString())
+                    .onChange(async (value) => {
+                        const parsed = parseInt(value);
+                        const numValue = isNaN(parsed) ? 1000 : Math.max(100, Math.min(parsed, 30000));
+                        this.plugin.settings.options.debounceMs = numValue;
+                        await this.plugin.saveSettings();
+                    });
+                text.inputEl.setAttribute('type', 'number');
+                text.inputEl.setAttribute('min', '100');
+                text.inputEl.setAttribute('max', '30000');
+                text.inputEl.setAttribute('inputmode', 'numeric');
+            });
 
         new Setting(containerEl)
             .setName('Enable logging')
@@ -463,41 +396,47 @@ class BacklinkMetadataSettingTab extends PluginSettingTab {
                 })
             );
 
-        // Display existing rules
+        // Display existing rules in a semantic list
+        const rulesContainer = containerEl.createDiv('rules-list');
+        rulesContainer.setAttribute('role', 'list');
+        rulesContainer.setAttribute('aria-label', 'Metadata update rules');
+
         this.plugin.settings.rules.forEach((rule, index) => {
-            this.displayRule(containerEl, rule, index);
+            this.displayRule(rulesContainer, rule, index);
         });
     }
 
-    private displayRule(containerEl: HTMLElement, rule: any, index: number) {
+    private displayRule(containerEl: HTMLElement, rule: Rule, index: number) {
         const ruleContainer = containerEl.createDiv('rule-container');
-        
-        // Display source pattern without /* for cleaner UI
-        const displaySource = rule.sourcePattern.endsWith('/*') 
-            ? rule.sourcePattern.slice(0, -2) 
+        ruleContainer.setAttribute('role', 'listitem');
+
+        const displaySource = rule.sourcePattern.endsWith('/*')
+            ? rule.sourcePattern.slice(0, -2)
             : rule.sourcePattern;
-        
+
         new Setting(ruleContainer)
             .setName(rule.name || `Rule ${index + 1}`)
             .setDesc(`${displaySource} → ${rule.updateField}`)
-            .addButton(button => button
-                .setButtonText('Edit')
-                .onClick(() => {
-                    this.editRule(ruleContainer, index);
-                })
-            )
-            .addButton(button => button
-                .setButtonText('Delete')
-                .setClass('mod-warning')
-                .onClick(() => {
-                    this.deleteRule(index);
-                })
-            );
+            .addButton(button => {
+                button.setButtonText('Edit')
+                    .onClick(() => {
+                        this.editRule(ruleContainer, index);
+                    });
+                button.buttonEl.setAttribute('aria-label', `Edit rule: ${rule.name || `Rule ${index + 1}`}`);
+            })
+            .addButton(button => {
+                button.setButtonText('Delete')
+                    .setClass('mod-warning')
+                    .onClick(() => {
+                        this.confirmDeleteRule(index, rule.name || `Rule ${index + 1}`);
+                    });
+                button.buttonEl.setAttribute('aria-label', `Delete rule: ${rule.name || `Rule ${index + 1}`}`);
+            });
     }
 
     private addNewRule() {
-        const newRule = {
-            id: `rule-${Date.now()}`,
+        const newRule: Rule = {
+            id: `rule-${Date.now()}-${Math.random().toString(36).substring(2, 9)}`,
             name: 'New Rule',
             sourcePattern: 'Daily Notes/*',
             targetTag: '#example',
@@ -509,24 +448,20 @@ class BacklinkMetadataSettingTab extends PluginSettingTab {
 
         this.plugin.settings.rules.push(newRule);
         this.plugin.saveSettings();
-        this.display(); // Refresh the display
+        this.display();
     }
 
     private editRule(ruleContainer: HTMLElement, index: number) {
         const rule = this.plugin.settings.rules[index];
-        
-        // Check if already editing this rule
+
         if (ruleContainer.querySelector('.rule-editor')) {
             return;
         }
-        
-        // Create editor container
+
         const editorContainer = ruleContainer.createDiv('rule-editor');
-        editorContainer.style.marginTop = '10px';
-        editorContainer.style.padding = '10px';
-        editorContainer.style.border = '1px solid var(--background-modifier-border)';
-        editorContainer.style.borderRadius = '4px';
-        
+        editorContainer.setAttribute('role', 'region');
+        editorContainer.setAttribute('aria-label', `Editing rule: ${rule.name}`);
+
         // Rule Name
         new Setting(editorContainer)
             .setName('Rule Name')
@@ -536,40 +471,38 @@ class BacklinkMetadataSettingTab extends PluginSettingTab {
                     rule.name = value;
                 })
             );
-        
+
         // Source Pattern
         new Setting(editorContainer)
             .setName('Source Pattern')
             .setDesc('Glob pattern for files that trigger updates (click to browse folders)')
             .addText(text => {
-                // Display folder path without /* for better UX
-                const displayValue = rule.sourcePattern.endsWith('/*') 
-                    ? rule.sourcePattern.slice(0, -2) 
+                const displayValue = rule.sourcePattern.endsWith('/*')
+                    ? rule.sourcePattern.slice(0, -2)
                     : rule.sourcePattern;
-                
+
                 const textEl = text
                     .setValue(displayValue)
                     .onChange((value) => {
-                        // If user manually types, preserve their input
                         rule.sourcePattern = value;
                     });
-                
-                // Make the text field clickable like Templater
+
                 textEl.inputEl.style.cursor = 'pointer';
+                textEl.inputEl.setAttribute('aria-haspopup', 'dialog');
                 textEl.inputEl.addEventListener('click', () => {
                     const modal = new FolderSuggestModal(this.plugin.app, (folder) => {
                         const pattern = folder.path ? `${folder.path}/*` : '*';
                         rule.sourcePattern = pattern;
-                        textEl.setValue(folder.path || ''); // Show folder path without /*
+                        textEl.setValue(folder.path || '');
                     });
                     modal.open();
                 });
-                
+
                 return textEl;
             });
-        
+
         // Target Type (Tag or Folder)
-        const targetTypeSetting = new Setting(editorContainer)
+        new Setting(editorContainer)
             .setName('Target Type')
             .addDropdown(dropdown => dropdown
                 .addOption('tag', 'Tag')
@@ -579,18 +512,17 @@ class BacklinkMetadataSettingTab extends PluginSettingTab {
                     this.updateTargetType(editorContainer, rule, value);
                 })
             );
-        
+
         // Target Value
         new Setting(editorContainer)
             .setName(rule.targetTag ? 'Target Tag' : 'Target Folder')
             .setDesc(rule.targetTag ? 'Tag to match (e.g., "#movie")' : 'Folder path to match (click to browse folders)')
             .addText(text => {
-                // Display folder path without /* for better UX
                 let displayValue = rule.targetTag || rule.targetFolder || '';
                 if (!rule.targetTag && displayValue.endsWith('/*')) {
                     displayValue = displayValue.slice(0, -2);
                 }
-                
+
                 const textComponent = text
                     .setValue(displayValue)
                     .onChange((value) => {
@@ -602,35 +534,35 @@ class BacklinkMetadataSettingTab extends PluginSettingTab {
                             rule.targetTag = undefined;
                         }
                     });
-                
-                // Make folder field clickable like Templater when it's a folder type
+
                 if (rule.targetFolder !== undefined) {
                     textComponent.inputEl.style.cursor = 'pointer';
+                    textComponent.inputEl.setAttribute('aria-haspopup', 'dialog');
                     textComponent.inputEl.addEventListener('click', () => {
                         const modal = new FolderSuggestModal(this.plugin.app, (folder) => {
                             const pattern = folder.path ? `${folder.path}/*` : '*';
                             rule.targetFolder = pattern;
                             rule.targetTag = undefined;
-                            textComponent.setValue(folder.path || ''); // Show folder path without /*
+                            textComponent.setValue(folder.path || '');
                         });
                         modal.open();
                     });
                 }
-                
+
                 return textComponent;
             });
-        
+
         // Update Field
         new Setting(editorContainer)
             .setName('Update Field')
-            .setDesc('Frontmatter field to update')
+            .setDesc('Frontmatter field to update (supports hyphens, e.g., "last-watched")')
             .addText(text => text
                 .setValue(rule.updateField)
                 .onChange((value) => {
                     rule.updateField = value;
                 })
             );
-        
+
         // Value Type
         new Setting(editorContainer)
             .setName('Value Type')
@@ -645,19 +577,23 @@ class BacklinkMetadataSettingTab extends PluginSettingTab {
                     rule.valueType = value as any;
                 })
             );
-        
+
         // Priority
         new Setting(editorContainer)
             .setName('Priority')
-            .setDesc('Lower numbers = higher priority')
-            .addText(text => text
-                .setValue(rule.priority.toString())
-                .onChange((value) => {
-                    const numValue = parseInt(value) || 1;
-                    rule.priority = numValue;
-                })
-            );
-        
+            .setDesc('Lower numbers = higher priority (1–100)')
+            .addText(text => {
+                text.setValue(rule.priority.toString())
+                    .onChange((value) => {
+                        const parsed = parseInt(value);
+                        rule.priority = isNaN(parsed) ? 1 : Math.max(1, Math.min(parsed, 100));
+                    });
+                text.inputEl.setAttribute('type', 'number');
+                text.inputEl.setAttribute('min', '1');
+                text.inputEl.setAttribute('max', '100');
+                text.inputEl.setAttribute('inputmode', 'numeric');
+            });
+
         // Enabled Toggle
         new Setting(editorContainer)
             .setName('Enabled')
@@ -667,7 +603,7 @@ class BacklinkMetadataSettingTab extends PluginSettingTab {
                     rule.enabled = value;
                 })
             );
-        
+
         // Preserve History Toggle
         new Setting(editorContainer)
             .setName('Preserve History')
@@ -678,41 +614,38 @@ class BacklinkMetadataSettingTab extends PluginSettingTab {
                     rule.preserveHistory = value;
                 })
             );
-        
+
         // Action buttons
-        const buttonContainer = editorContainer.createDiv();
-        buttonContainer.style.marginTop = '10px';
-        buttonContainer.style.display = 'flex';
-        buttonContainer.style.gap = '10px';
-        
+        const buttonContainer = editorContainer.createDiv('rule-editor-actions');
+
         const saveButton = buttonContainer.createEl('button', { text: 'Save' });
+        saveButton.setAttribute('aria-label', `Save rule: ${rule.name}`);
         saveButton.onclick = async () => {
-            // Basic validation
             const validation = this.validateRuleInputs(rule);
             if (!validation.isValid) {
                 new Notice(`Validation error: ${validation.errors.join(', ')}`);
                 return;
             }
-            
-            // Update the rule in the settings array
+
             const ruleIndex = this.plugin.settings.rules.findIndex(r => r.id === rule.id);
             if (ruleIndex !== -1) {
                 this.plugin.settings.rules[ruleIndex] = { ...rule };
             }
-            
+
             await this.plugin.saveSettings();
             editorContainer.remove();
-            this.display(); // Refresh to show updated rule
+            this.display();
             new Notice('Rule saved successfully');
         };
-        
+
         const cancelButton = buttonContainer.createEl('button', { text: 'Cancel' });
+        cancelButton.setAttribute('aria-label', `Cancel editing rule: ${rule.name}`);
         cancelButton.onclick = () => {
             editorContainer.remove();
         };
     }
-    
-    private updateTargetType(editorContainer: HTMLElement, rule: any, targetType: string) {
+
+    private updateTargetType(editorContainer: HTMLElement, rule: Rule, targetType: string) {
         if (targetType === 'tag') {
             rule.targetTag = rule.targetFolder || '#example';
             rule.targetFolder = undefined;
@@ -720,28 +653,25 @@ class BacklinkMetadataSettingTab extends PluginSettingTab {
             rule.targetFolder = rule.targetTag?.replace('#', '') || 'Example';
             rule.targetTag = undefined;
         }
-        
-        // Update the target value setting without removing the entire editor
+
         const targetValueSetting = editorContainer.querySelector('.setting-item:nth-of-type(4)') as HTMLElement;
         if (targetValueSetting) {
             const nameEl = targetValueSetting.querySelector('.setting-item-name');
             const descEl = targetValueSetting.querySelector('.setting-item-description');
             const inputEl = targetValueSetting.querySelector('input') as HTMLInputElement;
-            
+
             if (nameEl && descEl && inputEl) {
                 nameEl.textContent = targetType === 'tag' ? 'Target Tag' : 'Target Folder';
                 descEl.textContent = targetType === 'tag' ? 'Tag to match (e.g., "#movie")' : 'Folder path to match (click to browse folders)';
                 inputEl.value = rule.targetTag || rule.targetFolder || '';
             }
-            
-            // Set up appropriate cursor and click behavior
+
             if (targetType === 'folder') {
                 inputEl.style.cursor = 'pointer';
-                // Remove any existing click handlers by cloning the element
                 const newInputEl = inputEl.cloneNode(true) as HTMLInputElement;
                 inputEl.replaceWith(newInputEl);
-                
-                // Add folder picker click handler
+
+                newInputEl.setAttribute('aria-haspopup', 'dialog');
                 newInputEl.addEventListener('click', () => {
                     const modal = new FolderSuggestModal(this.plugin.app, (folder) => {
                         const pattern = folder.path ? `${folder.path}/*` : '*';
@@ -751,63 +681,129 @@ class BacklinkMetadataSettingTab extends PluginSettingTab {
                     });
                     modal.open();
                 });
-                
-                // Add change handler for manual typing
+
                 newInputEl.addEventListener('input', (e) => {
                     rule.targetFolder = (e.target as HTMLInputElement).value;
                     rule.targetTag = undefined;
                 });
+
+                // Restore focus after clone
+                newInputEl.focus();
             } else {
                 inputEl.style.cursor = 'text';
-                // For tag input, just ensure the change handler works
                 const newInputEl = inputEl.cloneNode(true) as HTMLInputElement;
                 inputEl.replaceWith(newInputEl);
-                
+
+                newInputEl.removeAttribute('aria-haspopup');
                 newInputEl.addEventListener('input', (e) => {
                     rule.targetTag = (e.target as HTMLInputElement).value;
                     rule.targetFolder = undefined;
                 });
+
+                // Restore focus after clone
+                newInputEl.focus();
             }
+
+            // Announce the change via a live region
+            let liveRegion = editorContainer.querySelector('.sr-live-region') as HTMLElement;
+            if (!liveRegion) {
+                liveRegion = editorContainer.createEl('div', { cls: 'sr-live-region' });
+                liveRegion.setAttribute('aria-live', 'polite');
+                liveRegion.setAttribute('role', 'status');
+                liveRegion.style.position = 'absolute';
+                liveRegion.style.width = '1px';
+                liveRegion.style.height = '1px';
+                liveRegion.style.overflow = 'hidden';
+                liveRegion.style.clip = 'rect(0, 0, 0, 0)';
+            }
+            liveRegion.textContent = `Target type changed to ${targetType}.`;
         }
     }
-    
-    private validateRuleInputs(rule: any): { isValid: boolean; errors: string[] } {
+
+    private validateRuleInputs(rule: Rule): { isValid: boolean; errors: string[] } {
         const errors: string[] = [];
-        
+
         if (!rule.name || rule.name.trim() === '') {
             errors.push('Rule name is required');
         }
-        
+
         if (!rule.sourcePattern || rule.sourcePattern.trim() === '') {
             errors.push('Source pattern is required');
         }
-        
+
         if (!rule.targetTag && !rule.targetFolder) {
             errors.push('Either target tag or target folder must be specified');
         }
-        
+
         if (rule.targetTag && !rule.targetTag.startsWith('#')) {
             errors.push('Target tag must start with #');
         }
-        
+
         if (!rule.updateField || rule.updateField.trim() === '') {
             errors.push('Update field is required');
         }
-        
+
         if (rule.priority < 1) {
             errors.push('Priority must be at least 1');
         }
-        
+
         return {
             isValid: errors.length === 0,
             errors
         };
     }
 
+    private confirmDeleteRule(index: number, ruleName: string) {
+        const modal = new ConfirmDeleteModal(this.plugin.app, ruleName, () => {
+            this.plugin.settings.rules.splice(index, 1);
+            this.plugin.saveSettings();
+            this.display();
+        });
+        modal.open();
+    }
+
     private deleteRule(index: number) {
         this.plugin.settings.rules.splice(index, 1);
         this.plugin.saveSettings();
-        this.display(); // Refresh the display
+        this.display();
+    }
+}
+
+class ConfirmDeleteModal extends Modal {
+    private ruleName: string;
+    private onConfirm: () => void;
+
+    constructor(app: App, ruleName: string, onConfirm: () => void) {
+        super(app);
+        this.ruleName = ruleName;
+        this.onConfirm = onConfirm;
+    }
+
+    onOpen() {
+        const { contentEl } = this;
+        contentEl.createEl('h3', { text: 'Delete Rule' });
+        contentEl.createEl('p', { text: `Are you sure you want to delete "${this.ruleName}"? This cannot be undone.` });
+
+        const buttonContainer = contentEl.createDiv('confirm-delete-actions');
+        buttonContainer.style.display = 'flex';
+        buttonContainer.style.gap = '10px';
+        buttonContainer.style.justifyContent = 'flex-end';
+        buttonContainer.style.marginTop = '16px';
+
+        const deleteBtn = buttonContainer.createEl('button', { text: 'Delete', cls: 'mod-warning' });
+        deleteBtn.onclick = () => {
+            this.onConfirm();
+            this.close();
+        };
+
+        const cancelBtn = buttonContainer.createEl('button', { text: 'Cancel' });
+        cancelBtn.onclick = () => {
+            this.close();
+        };
+    }
+
+    onClose() {
+        this.contentEl.empty();
     }
 }
 

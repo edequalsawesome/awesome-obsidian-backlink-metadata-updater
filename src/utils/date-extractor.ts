@@ -3,9 +3,18 @@ import { moment } from 'obsidian';
 
 export class DateExtractor {
     private app: any;
+    private dateFormat: string;
 
-    constructor(app: any) {
+    constructor(app: any, dateFormat: string = 'YYYY-MM-DD') {
         this.app = app;
+        this.dateFormat = dateFormat;
+    }
+
+    /**
+     * Update the date format (e.g., when settings change).
+     */
+    setDateFormat(format: string): void {
+        this.dateFormat = format;
     }
 
     /**
@@ -37,10 +46,10 @@ export class DateExtractor {
         if (!cache?.frontmatter) return null;
 
         const frontmatter = cache.frontmatter;
-        
+
         // Check common date field names
         const dateFields = ['date', 'created', 'day', 'timestamp'];
-        
+
         for (const field of dateFields) {
             if (frontmatter[field]) {
                 const parsed = this.parseDate(frontmatter[field]);
@@ -53,21 +62,19 @@ export class DateExtractor {
 
     private extractFromFilename(file: TFile): string | null {
         const basename = file.basename;
-        
+
         // Common date patterns in filenames
         const patterns = [
-            // YYYY-MM-DD
+            // YYYY-MM-DD (unambiguous, try first)
             /(\d{4}-\d{2}-\d{2})/,
-            // DD-MM-YYYY
-            /(\d{2}-\d{2}-\d{4})/,
-            // YYYY.MM.DD
+            // YYYY.MM.DD (unambiguous)
             /(\d{4}\.\d{2}\.\d{2})/,
+            // DD-MM-YYYY (ambiguous with MM-DD-YYYY — documented behavior: tries DD-MM first)
+            /(\d{2}-\d{2}-\d{4})/,
             // DD.MM.YYYY
             /(\d{2}\.\d{2}\.\d{4})/,
             // YYYYMMDD
             /(\d{8})/,
-            // MM/DD/YYYY
-            /(\d{2}\/\d{2}\/\d{4})/,
         ];
 
         for (const pattern of patterns) {
@@ -83,7 +90,7 @@ export class DateExtractor {
 
     private extractFromPath(file: TFile): string | null {
         const path = file.path;
-        
+
         // Look for date patterns in the path structure
         // e.g., "Daily Notes/2024/11/2024-11-15.md"
         const pathPatterns = [
@@ -108,7 +115,7 @@ export class DateExtractor {
                 } else {
                     continue;
                 }
-                
+
                 const parsed = this.parseDate(dateStr);
                 if (parsed) return this.formatDate(parsed);
             }
@@ -128,6 +135,12 @@ export class DateExtractor {
         // If it's a timestamp
         if (typeof input === 'number') {
             return moment(input);
+        }
+
+        // Try the configured format first for faster matching
+        const configuredParsed = moment(input, this.dateFormat, true);
+        if (configuredParsed.isValid()) {
+            return configuredParsed;
         }
 
         // Parse string dates with various formats
@@ -157,7 +170,7 @@ export class DateExtractor {
     }
 
     private formatDate(date: moment.Moment): string {
-        return date.format('YYYY-MM-DD');
+        return date.format(this.dateFormat);
     }
 
     /**
