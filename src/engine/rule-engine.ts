@@ -44,14 +44,8 @@ export class RuleEngine {
             return true;
         }
 
-        // Folder match
-        if (pattern.endsWith('/') && sourceFile.path.startsWith(pattern)) {
-            return true;
-        }
-
-        // Parent folder match
-        const parentPath = sourceFile.parent?.path || '';
-        if (parentPath === pattern) {
+        // Folder match (with or without trailing slash) — recursive
+        if (sourceFile.path.startsWith(pattern.endsWith('/') ? pattern : pattern + '/')) {
             return true;
         }
 
@@ -73,10 +67,13 @@ export class RuleEngine {
 
         // Check target folder if specified
         if (rule.targetFolder) {
-            // Target folder patterns ending with /* should match recursively (/**)
-            // since "target folder" semantically means "any file under this folder tree"
+            // Target folder semantically means "any file under this folder tree"
+            // Bare folder names (no glob) get /** appended; /* gets promoted to /**
             let folderPattern = rule.targetFolder;
-            if (folderPattern.endsWith('/*') && !folderPattern.endsWith('/**')) {
+            if (!folderPattern.includes('*')) {
+                // Bare folder name like "Places" → "Places/**"
+                folderPattern = folderPattern.replace(/\/+$/, '') + '/**';
+            } else if (folderPattern.endsWith('/*') && !folderPattern.endsWith('/**')) {
                 folderPattern = folderPattern.slice(0, -2) + '/**';
             }
             const matchesFolder = this.matchesGlobPattern(folderPattern, targetFile.path);
