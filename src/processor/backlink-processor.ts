@@ -1,4 +1,4 @@
-import { TFile, CachedMetadata, parseFrontMatterEntry } from 'obsidian';
+import { App, TFile, CachedMetadata, parseFrontMatterEntry } from 'obsidian';
 import { Rule, ProcessingContext, MetadataUpdate, ValueType, PluginOptions } from '../types';
 import { DateExtractor } from '../utils/date-extractor';
 import { RuleEngine } from '../engine/rule-engine';
@@ -6,12 +6,12 @@ import { RuleEngine } from '../engine/rule-engine';
 const MAX_HISTORY_ENTRIES = 100;
 
 export class BacklinkProcessor {
-    private app: any;
+    private app: App;
     private dateExtractor: DateExtractor;
     private ruleEngine: RuleEngine;
-    private processingQueue: Map<string, NodeJS.Timeout> = new Map();
+    private processingQueue: Map<string, ReturnType<typeof setTimeout>> = new Map();
 
-    constructor(app: any, dateExtractor: DateExtractor, ruleEngine: RuleEngine) {
+    constructor(app: App, dateExtractor: DateExtractor, ruleEngine: RuleEngine) {
         this.app = app;
         this.dateExtractor = dateExtractor;
         this.ruleEngine = ruleEngine;

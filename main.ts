@@ -85,7 +85,7 @@ export default class BacklinkMetadataPlugin extends Plugin {
         }
 
         // Use processor's extractOutgoingLinks to avoid duplicated logic
-        const currentContent = await this.app.vault.read(file);
+        const currentContent = await this.app.vault.cachedRead(file);
         const currentHash = this.hashContent(currentContent);
         const currentLinks = this.processor.extractOutgoingLinks(file);
 
@@ -295,7 +295,15 @@ export default class BacklinkMetadataPlugin extends Plugin {
     }
 
     async loadSettings() {
-        this.settings = Object.assign({}, DEFAULT_SETTINGS, await this.loadData());
+        const saved = await this.loadData();
+        this.settings = {
+            ...DEFAULT_SETTINGS,
+            ...saved,
+            options: {
+                ...DEFAULT_SETTINGS.options,
+                ...(saved?.options || {}),
+            },
+        };
     }
 
     async saveSettings() {
@@ -306,10 +314,24 @@ export default class BacklinkMetadataPlugin extends Plugin {
 
 class BacklinkMetadataSettingTab extends PluginSettingTab {
     plugin: BacklinkMetadataPlugin;
+    private settingsSaveTimer: ReturnType<typeof setTimeout> | null = null;
 
     constructor(app: App, plugin: BacklinkMetadataPlugin) {
         super(app, plugin);
         this.plugin = plugin;
+    }
+
+    /**
+     * Debounced save for text inputs to avoid saving on every keystroke.
+     */
+    private debouncedSaveSettings(): void {
+        if (this.settingsSaveTimer) {
+            clearTimeout(this.settingsSaveTimer);
+        }
+        this.settingsSaveTimer = setTimeout(() => {
+            this.plugin.saveSettings();
+            this.settingsSaveTimer = null;
+        }, 500);
     }
 
     display(): void {
@@ -347,9 +369,9 @@ class BacklinkMetadataSettingTab extends PluginSettingTab {
             .addText(text => text
                 .setPlaceholder('YYYY-MM-DD')
                 .setValue(this.plugin.settings.options.dateFormat)
-                .onChange(async (value) => {
+                .onChange((value) => {
                     this.plugin.settings.options.dateFormat = value || 'YYYY-MM-DD';
-                    await this.plugin.saveSettings();
+                    this.debouncedSaveSettings();
                 })
             );
 
@@ -359,11 +381,11 @@ class BacklinkMetadataSettingTab extends PluginSettingTab {
             .addText(text => {
                 text.setPlaceholder('1000')
                     .setValue(this.plugin.settings.options.debounceMs.toString())
-                    .onChange(async (value) => {
+                    .onChange((value) => {
                         const parsed = parseInt(value);
                         const numValue = isNaN(parsed) ? 1000 : Math.max(100, Math.min(parsed, 30000));
                         this.plugin.settings.options.debounceMs = numValue;
-                        await this.plugin.saveSettings();
+                        this.debouncedSaveSettings();
                     });
                 text.inputEl.setAttribute('type', 'number');
                 text.inputEl.setAttribute('min', '100');
@@ -458,9 +480,22 @@ class BacklinkMetadataSettingTab extends PluginSettingTab {
             return;
         }
 
+        this.renderRuleEditor(ruleContainer, rule);
+    }
+
+    private renderRuleEditor(ruleContainer: HTMLElement, rule: Rule) {
+        // Remove any existing editor before re-rendering
+        const existing = ruleContainer.querySelector('.rule-editor');
+        if (existing) existing.remove();
+
         const editorContainer = ruleContainer.createDiv('rule-editor');
         editorContainer.setAttribute('role', 'region');
         editorContainer.setAttribute('aria-label', `Editing rule: ${rule.name}`);
+
+        // Live region for screen reader announcements
+        const liveRegion = editorContainer.createDiv('sr-live-region');
+        liveRegion.setAttribute('aria-live', 'polite');
+        liveRegion.setAttribute('role', 'status');
 
         // Rule Name
         new Setting(editorContainer)
@@ -489,7 +524,7 @@ class BacklinkMetadataSettingTab extends PluginSettingTab {
 
                 textEl.inputEl.style.cursor = 'pointer';
                 textEl.inputEl.setAttribute('aria-haspopup', 'dialog');
-                textEl.inputEl.addEventListener('click', () => {
+                this.plugin.registerDomEvent(textEl.inputEl, 'click', () => {
                     const modal = new FolderSuggestModal(this.plugin.app, (folder) => {
                         const pattern = folder.path ? `${folder.path}/*` : '*';
                         rule.sourcePattern = pattern;
@@ -509,7 +544,16 @@ class BacklinkMetadataSettingTab extends PluginSettingTab {
                 .addOption('folder', 'Folder')
                 .setValue(rule.targetTag ? 'tag' : 'folder')
                 .onChange((value) => {
-                    this.updateTargetType(editorContainer, rule, value);
+                    if (value === 'tag') {
+                        rule.targetTag = rule.targetFolder || '#example';
+                        rule.targetFolder = undefined;
+                    } else {
+                        rule.targetFolder = rule.targetTag?.replace('#', '') || 'Example';
+                        rule.targetTag = undefined;
+                    }
+                    // Re-render the entire editor to swap the target field cleanly
+                    this.renderRuleEditor(ruleContainer, rule);
+                    liveRegion.textContent = `Target type changed to ${value}.`;
                 })
             );
 
@@ -538,7 +582,7 @@ class BacklinkMetadataSettingTab extends PluginSettingTab {
                 if (rule.targetFolder !== undefined) {
                     textComponent.inputEl.style.cursor = 'pointer';
                     textComponent.inputEl.setAttribute('aria-haspopup', 'dialog');
-                    textComponent.inputEl.addEventListener('click', () => {
+                    this.plugin.registerDomEvent(textComponent.inputEl, 'click', () => {
                         const modal = new FolderSuggestModal(this.plugin.app, (folder) => {
                             const pattern = folder.path ? `${folder.path}/*` : '*';
                             rule.targetFolder = pattern;
@@ -645,81 +689,6 @@ class BacklinkMetadataSettingTab extends PluginSettingTab {
         };
     }
 
-    private updateTargetType(editorContainer: HTMLElement, rule: Rule, targetType: string) {
-        if (targetType === 'tag') {
-            rule.targetTag = rule.targetFolder || '#example';
-            rule.targetFolder = undefined;
-        } else {
-            rule.targetFolder = rule.targetTag?.replace('#', '') || 'Example';
-            rule.targetTag = undefined;
-        }
-
-        const targetValueSetting = editorContainer.querySelector('.setting-item:nth-of-type(4)') as HTMLElement;
-        if (targetValueSetting) {
-            const nameEl = targetValueSetting.querySelector('.setting-item-name');
-            const descEl = targetValueSetting.querySelector('.setting-item-description');
-            const inputEl = targetValueSetting.querySelector('input') as HTMLInputElement;
-
-            if (nameEl && descEl && inputEl) {
-                nameEl.textContent = targetType === 'tag' ? 'Target Tag' : 'Target Folder';
-                descEl.textContent = targetType === 'tag' ? 'Tag to match (e.g., "#movie")' : 'Folder path to match (click to browse folders)';
-                inputEl.value = rule.targetTag || rule.targetFolder || '';
-            }
-
-            if (targetType === 'folder') {
-                inputEl.style.cursor = 'pointer';
-                const newInputEl = inputEl.cloneNode(true) as HTMLInputElement;
-                inputEl.replaceWith(newInputEl);
-
-                newInputEl.setAttribute('aria-haspopup', 'dialog');
-                newInputEl.addEventListener('click', () => {
-                    const modal = new FolderSuggestModal(this.plugin.app, (folder) => {
-                        const pattern = folder.path ? `${folder.path}/*` : '*';
-                        rule.targetFolder = pattern;
-                        rule.targetTag = undefined;
-                        newInputEl.value = pattern;
-                    });
-                    modal.open();
-                });
-
-                newInputEl.addEventListener('input', (e) => {
-                    rule.targetFolder = (e.target as HTMLInputElement).value;
-                    rule.targetTag = undefined;
-                });
-
-                // Restore focus after clone
-                newInputEl.focus();
-            } else {
-                inputEl.style.cursor = 'text';
-                const newInputEl = inputEl.cloneNode(true) as HTMLInputElement;
-                inputEl.replaceWith(newInputEl);
-
-                newInputEl.removeAttribute('aria-haspopup');
-                newInputEl.addEventListener('input', (e) => {
-                    rule.targetTag = (e.target as HTMLInputElement).value;
-                    rule.targetFolder = undefined;
-                });
-
-                // Restore focus after clone
-                newInputEl.focus();
-            }
-
-            // Announce the change via a live region
-            let liveRegion = editorContainer.querySelector('.sr-live-region') as HTMLElement;
-            if (!liveRegion) {
-                liveRegion = editorContainer.createEl('div', { cls: 'sr-live-region' });
-                liveRegion.setAttribute('aria-live', 'polite');
-                liveRegion.setAttribute('role', 'status');
-                liveRegion.style.position = 'absolute';
-                liveRegion.style.width = '1px';
-                liveRegion.style.height = '1px';
-                liveRegion.style.overflow = 'hidden';
-                liveRegion.style.clip = 'rect(0, 0, 0, 0)';
-            }
-            liveRegion.textContent = `Target type changed to ${targetType}.`;
-        }
-    }
-
     private validateRuleInputs(rule: Rule): { isValid: boolean; errors: string[] } {
         const errors: string[] = [];
 
@@ -785,10 +754,6 @@ class ConfirmDeleteModal extends Modal {
         contentEl.createEl('p', { text: `Are you sure you want to delete "${this.ruleName}"? This cannot be undone.` });
 
         const buttonContainer = contentEl.createDiv('confirm-delete-actions');
-        buttonContainer.style.display = 'flex';
-        buttonContainer.style.gap = '10px';
-        buttonContainer.style.justifyContent = 'flex-end';
-        buttonContainer.style.marginTop = '16px';
 
         const deleteBtn = buttonContainer.createEl('button', { text: 'Delete', cls: 'mod-warning' });
         deleteBtn.onclick = () => {

@@ -27,3 +27,24 @@
     outline: 2px solid var(--interactive-accent);
     outline-offset: 2px;
 }
+
+/* Confirm delete modal actions */
+.confirm-delete-actions {
+    display: flex;
+    gap: 10px;
+    justify-content: flex-end;
+    margin-top: 16px;
+}
+
+/* Screen reader only live region */
+.sr-live-region {
+    position: absolute;
+    width: 1px;
+    height: 1px;
+    padding: 0;
+    margin: -1px;
+    overflow: hidden;
+    clip: rect(0, 0, 0, 0);
+    white-space: nowrap;
+    border: 0;
+}

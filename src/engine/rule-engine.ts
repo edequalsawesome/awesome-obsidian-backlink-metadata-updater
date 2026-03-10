@@ -1,12 +1,12 @@
-import { TFile, TAbstractFile, CachedMetadata } from 'obsidian';
+import { App, TFile, TAbstractFile, CachedMetadata } from 'obsidian';
 import { Rule, ValidationResult, ProcessingContext } from '../types';
 
 export class RuleEngine {
-    private app: any;
+    private app: App;
     private regexCache: Map<string, RegExp> = new Map();
     private enableLogging: boolean = false;
 
-    constructor(app: any) {
+    constructor(app: App) {
         this.app = app;
     }
 

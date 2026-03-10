@@ -1,11 +1,11 @@
-import { TFile, TAbstractFile, CachedMetadata } from 'obsidian';
+import { App, TFile, TAbstractFile, CachedMetadata } from 'obsidian';
 import { moment } from 'obsidian';
 
 export class DateExtractor {
-    private app: any;
+    private app: App;
     private dateFormat: string;
 
-    constructor(app: any, dateFormat: string = 'YYYY-MM-DD') {
+    constructor(app: App, dateFormat: string = 'YYYY-MM-DD') {
         this.app = app;
         this.dateFormat = dateFormat;
     }
