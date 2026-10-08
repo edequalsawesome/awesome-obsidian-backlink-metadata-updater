@@ -5,10 +5,10 @@ An Obsidian plugin that automatically updates note metadata based on backlinks. 
 ## Features
 
 ### Core Functionality
-- **Automatic Updates**: Real-time metadata updates when files are modified
+- **Automatic Updates**: Metadata updates after Obsidian indexes changes to source links, dates, or titles
 - **Configurable Rules**: Define custom rules for different note types and contexts
 - **Smart Date Extraction**: Automatically extracts dates from daily notes, filenames, and frontmatter
-- **Flexible Value Types**: Support for dates, links, titles, and custom values
+- **Flexible Value Types**: Support for dates, links, and date/title objects
 - **History Tracking**: Optional preservation of update history
 
 ### Rule-Based System
@@ -21,6 +21,7 @@ Configure rules to control how metadata gets updated:
 ### Built-in Commands
 - **Process All Files**: Bulk update all metadata based on existing backlinks
 - **Process Current File**: Update metadata for the currently active file
+- **Retry Pending Backlink Cleanup**: Retry failed removed-link, deletion, or rename cleanup while the plugin remains loaded. A later indexed event for the source or affected target also retries once; there is no automatic retry loop. Disabling Update on delete pauses pending cleanup until re-enabled; current outgoing links at a restored or renamed-back source path are preserved
 - **Validate Rules**: Check rule configuration for errors and conflicts
 
 ## Quick Start
@@ -73,7 +74,7 @@ Type: append_unique_link
 
 ### Plugin Options
 - **Preserve History**: Keep track of all updates in separate history fields
-- **Update on Delete**: Clean up metadata when links are removed
+- **Update on Delete**: Remove generated source links and date/title objects when a source link is removed, a source note is deleted, or a source is renamed. Cleanup uses currently matching rules. Plain date fields and history are preserved because they may describe other sources
 - **Date Format**: Customize date format (uses moment.js format strings)
 - **Debounce Delay**: Control processing delay for rapid edits
 - **Enable Logging**: Debug logging to browser console
@@ -89,7 +90,7 @@ Type: append_unique_link
 
 ### Organizing Rules
 - Use clear, descriptive rule names
-- Set appropriate priorities for conflicting rules
+- Priority controls execution order: lower numbers run first, and later rules may overwrite earlier values
 - Test rules with small sets of files first
 - Use the validation command to check for conflicts
 
@@ -103,6 +104,14 @@ Type: append_unique_link
 - Always backup your vault before bulk operations
 - Test new rules on a small subset of files first
 
+Configured output properties and their history properties are derived metadata, so their links do not trigger other rules. Configured output properties are also excluded from source date/title extraction. User links in the note body and other frontmatter properties remain inputs.
+
+Repeated automatic events with the same source links, date, and title do not append more entries. Explicit processing commands can still repeat `append_link` entries. History deduplicates identical values from the same source.
+
+Stored ISO dates remain comparable after a format change. Unrecognized existing date strings are preserved; clear or correct them manually before processing.
+
+Requires Obsidian 1.4.4 or newer.
+
 ## Development
 
 ### Building from Source
@@ -111,6 +120,8 @@ git clone https://github.com/edequalsawesome/awesome-obsidian-backlink-metadata-
 cd awesome-obsidian-backlink-metadata-updater
 npm install
 npm run build
+npm test
+npm run lint
 ```
 
 ### Architecture
@@ -125,4 +136,6 @@ npm run build
 
 ## License
 
-MIT License - see LICENSE file for details.
+ISC License - see LICENSE file for details.
+
+Settings storage failures show a notice. Failed Add/Delete actions restore their still-current rule changes and preserve drafts. Failed option saves leave the active values in memory; change an option again to retry before reloading.

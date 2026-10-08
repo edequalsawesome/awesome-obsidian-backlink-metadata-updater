@@ -1,11 +1,11 @@
-import { App, TFile, TAbstractFile, CachedMetadata } from 'obsidian';
+import { App, TFile } from 'obsidian';
 import { moment } from 'obsidian';
 
 export class DateExtractor {
     private app: App;
     private dateFormat: string;
 
-    constructor(app: App, dateFormat: string = 'YYYY-MM-DD') {
+    constructor(app: App, dateFormat = 'YYYY-MM-DD') {
         this.app = app;
         this.dateFormat = dateFormat;
     }
@@ -24,9 +24,9 @@ export class DateExtractor {
      * 3. Daily note patterns
      * 4. Creation date as fallback
      */
-    extractDate(file: TFile): string | null {
+    extractDate(file: TFile, generatedFields: string[] = []): string | null {
         // Try frontmatter first
-        const frontmatterDate = this.extractFromFrontmatter(file);
+        const frontmatterDate = this.extractFromFrontmatter(file, generatedFields);
         if (frontmatterDate) return frontmatterDate;
 
         // Try filename patterns
@@ -41,7 +41,7 @@ export class DateExtractor {
         return this.formatDate(moment(file.stat.ctime));
     }
 
-    private extractFromFrontmatter(file: TFile): string | null {
+    private extractFromFrontmatter(file: TFile, generatedFields: string[]): string | null {
         const cache = this.app.metadataCache.getFileCache(file);
         if (!cache?.frontmatter) return null;
 
@@ -51,6 +51,7 @@ export class DateExtractor {
         const dateFields = ['date', 'created', 'day', 'timestamp'];
 
         for (const field of dateFields) {
+            if (generatedFields.includes(field)) continue;
             if (frontmatter[field]) {
                 const parsed = this.parseDate(frontmatter[field]);
                 if (parsed) return this.formatDate(parsed);
@@ -176,10 +177,10 @@ export class DateExtractor {
     /**
      * Extract title from various sources
      */
-    extractTitle(file: TFile): string | null {
+    extractTitle(file: TFile, generatedFields: string[] = []): string | null {
         // Try frontmatter title first
         const cache = this.app.metadataCache.getFileCache(file);
-        if (cache?.frontmatter?.title) {
+        if (!generatedFields.includes('title') && typeof cache?.frontmatter?.title === 'string' && cache.frontmatter.title) {
             return cache.frontmatter.title;
         }
 

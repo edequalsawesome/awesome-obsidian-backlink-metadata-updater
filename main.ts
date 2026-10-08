@@ -1,4 +1,4 @@
-import { App, TFile, Plugin, Notice, PluginSettingTab, Setting, FuzzySuggestModal, TFolder, Modal } from 'obsidian';
+import { App, TFile, Plugin, Notice, PluginSettingTab, Setting, FuzzySuggestModal, TFolder, Modal, ButtonComponent } from 'obsidian';
 import { BacklinkMetadataSettings, DEFAULT_SETTINGS, Rule } from './src/types';
 import { DateExtractor } from './src/utils/date-extractor';
 import { RuleEngine } from './src/engine/rule-engine';
@@ -9,7 +9,9 @@ export default class BacklinkMetadataPlugin extends Plugin {
     private dateExtractor: DateExtractor;
     private ruleEngine: RuleEngine;
     private processor: BacklinkProcessor;
-    private fileContentCache: Map<string, { contentHash: number; links: string[] }> = new Map();
+    private fileContentCache: Map<string, { signature: string; links: string[] }> = new Map();
+    private stopped = false;
+    private pendingCleanup = new Set<{ readonly source: TFile; readonly sourcePath: string; readonly eventPath: string; readonly targetPaths: readonly string[]; running?: Promise<void> }>();
 
     async onload() {
         await this.loadSettings();
@@ -22,7 +24,9 @@ export default class BacklinkMetadataPlugin extends Plugin {
 
         // Register event handlers using onLayoutReady for better performance
         this.app.workspace.onLayoutReady(() => {
+            if (this.stopped) return;
             this.registerEventHandlers();
+            this.seedSourceCache();
         });
 
         // Add commands
@@ -33,8 +37,10 @@ export default class BacklinkMetadataPlugin extends Plugin {
     }
 
     onunload() {
+        this.stopped = true;
         this.processor?.cancelAllProcessing();
         this.fileContentCache.clear();
+        this.pendingCleanup.clear();
     }
 
     /**
@@ -44,112 +50,118 @@ export default class BacklinkMetadataPlugin extends Plugin {
         this.dateExtractor?.setDateFormat(this.settings.options.dateFormat);
         this.ruleEngine?.setLogging(this.settings.options.enableLogging);
         this.ruleEngine?.clearRegexCache();
+        if (this.processor && !this.stopped) this.seedSourceCache();
+    }
+
+    private seedSourceCache(): void {
+        for (const file of this.app.vault.getMarkdownFiles()) {
+            if (!this.fileContentCache.has(file.path) && this.shouldProcessFile(file)) this.cacheSource(file);
+        }
     }
 
     private registerEventHandlers() {
         this.registerEvent(
-            this.app.vault.on('modify', (file: TFile) => {
-                this.handleFileModify(file);
+            this.app.metadataCache.on('changed', (file: TFile) => {
+                void this.handleFileModify(file).catch(error => console.error('Error updating backlink metadata:', error));
             })
         );
 
         this.registerEvent(
-            this.app.vault.on('rename', (file: TFile, oldPath: string) => {
-                this.handleFileRename(file, oldPath);
+            this.app.vault.on('rename', (file, oldPath: string) => {
+                if (file instanceof TFile) void this.handleFileRename(file, oldPath).catch(error => console.error('Error updating renamed source:', error));
             })
         );
 
         this.registerEvent(
-            this.app.vault.on('delete', (file: TFile) => {
-                this.handleFileDelete(file);
+            this.app.vault.on('delete', (file) => {
+                if (file instanceof TFile) void this.handleFileDelete(file).catch(error => console.error('Error cleaning deleted source:', error));
             })
         );
     }
 
-    /**
-     * Simple string hash for content comparison (avoids storing full content).
-     */
-    private hashContent(content: string): number {
-        let hash = 0;
-        for (let i = 0; i < content.length; i++) {
-            const chr = content.charCodeAt(i);
-            hash = ((hash << 5) - hash) + chr;
-            hash |= 0; // Convert to 32bit integer
+    private cacheSource(file: TFile): { signature: string; links: string[] } {
+        const links = this.processor.extractOutgoingLinks(file, this.settings.rules);
+        const generatedFields = this.settings.rules.map(rule => rule.updateField);
+        const sourceRules = this.settings.rules.filter(rule => rule.enabled && this.ruleEngine.matchesSourcePattern(rule, file));
+        // Only inputs used by rules trigger automatic updates. Generated history and
+        // duplicate backlink writes cannot keep reciprocal rules running forever.
+        const snapshot = {
+            links,
+            signature: JSON.stringify([
+                [...links].sort(),
+                sourceRules.some(rule => rule.valueType === 'date' || rule.valueType === 'date_and_title') ? this.dateExtractor.extractDate(file, generatedFields) : null,
+                sourceRules.some(rule => rule.valueType === 'date_and_title') ? this.dateExtractor.extractTitle(file, generatedFields) : null,
+            ]),
+        };
+        const existing = this.fileContentCache.get(file.path);
+        if (existing?.signature === snapshot.signature) return existing;
+        this.fileContentCache.set(file.path, snapshot);
+        return snapshot;
+    }
+
+    private queueCleanup(file: TFile, targetPaths: string[], sourcePath = file.path): void {
+        if (this.stopped || !this.settings.options.updateOnDelete || !targetPaths.length) return;
+        this.pendingCleanup.add({ source: { ...file, path: sourcePath } as TFile, sourcePath, eventPath: file.path, targetPaths: [...targetPaths] });
+    }
+
+    private async retryCleanup(path?: string): Promise<void> {
+        for (const operation of [...this.pendingCleanup]) {
+            if (this.stopped || !this.settings.options.updateOnDelete) return;
+            if (!this.pendingCleanup.has(operation)) continue;
+            if (path && operation.sourcePath !== path && operation.eventPath !== path && !operation.targetPaths.includes(path)) continue;
+            if (!operation.running) {
+                operation.running = this.processor.cleanupRemovedLinks(operation.source,
+                    [...operation.targetPaths], this.settings.rules, this.settings.options, operation.sourcePath)
+                    .then(completed => { if (completed) this.pendingCleanup.delete(operation); })
+                    .catch(error => {
+                        if (!this.stopped) new Notice(`Backlink cleanup failed for ${operation.sourcePath}. Run Retry pending backlink cleanup: ${error instanceof Error ? error.message : String(error)}`);
+                    }).finally(() => { operation.running = undefined; });
+            }
+            await operation.running;
         }
-        return hash;
+    }
+
+    private scheduleSource(file: TFile, snapshot: { signature: string; links: string[] }): void {
+        const path = file.path;
+        this.processor.scheduleProcessing(file, this.settings.rules, this.settings.options, error => {
+            if (this.stopped) return;
+            if (this.fileContentCache.get(path) === snapshot) snapshot.signature = '';
+            new Notice(`Backlink update failed for ${path}. Edit the source or run Process current file to retry: ${error instanceof Error ? error.message : String(error)}`);
+        });
     }
 
     private async handleFileModify(file: TFile) {
-        if (!this.shouldProcessFile(file)) {
-            return;
+        if (this.stopped) return;
+        if (!this.shouldProcessFile(file)) { await this.retryCleanup(file.path); return; }
+        const path = file.path;
+        const previous = this.fileContentCache.get(path);
+        const current = this.cacheSource(file);
+        const currentLinks = new Set(current.links);
+        this.queueCleanup(file, previous?.links.filter(link => !currentLinks.has(link)) || [], path);
+        await this.retryCleanup(path);
+        if (!this.stopped && file.path === path && this.fileContentCache.get(path) === current && previous?.signature !== current.signature) {
+            this.scheduleSource(file, current);
         }
-
-        // Use processor's extractOutgoingLinks to avoid duplicated logic
-        const currentContent = await this.app.vault.cachedRead(file);
-        const currentHash = this.hashContent(currentContent);
-        const currentLinks = this.processor.extractOutgoingLinks(file);
-
-        const cached = this.fileContentCache.get(file.path);
-
-        if (cached) {
-            const contentChanged = cached.contentHash !== currentHash;
-            const linksChanged = !this.arraysEqual(cached.links, currentLinks);
-
-            if (!contentChanged) {
-                return;
-            }
-
-            if (!linksChanged && currentLinks.length === 0) {
-                return;
-            }
-
-            if (linksChanged) {
-                const newLinks = currentLinks.filter(link => !cached.links.includes(link));
-                const removedLinks = cached.links.filter(link => !currentLinks.includes(link));
-
-                if (newLinks.length === 0 && removedLinks.length === 0) {
-                    this.fileContentCache.set(file.path, { contentHash: currentHash, links: currentLinks });
-                    return;
-                }
-            }
-        }
-
-        this.fileContentCache.set(file.path, { contentHash: currentHash, links: currentLinks });
-
-        // Schedule processing with debouncing
-        this.processor.scheduleProcessing(file, this.settings.rules, this.settings.options);
-    }
-
-    private arraysEqual(a: string[], b: string[]): boolean {
-        if (a.length !== b.length) return false;
-
-        const sortedA = [...a].sort();
-        const sortedB = [...b].sort();
-
-        return sortedA.every((val, index) => val === sortedB[index]);
     }
 
     private async handleFileRename(file: TFile, oldPath: string) {
-        if (this.settings.options.enableLogging) {
-            console.log(`File renamed: ${oldPath} -> ${file.path}`);
-        }
-
+        if (this.stopped) return;
+        const path = file.path;
         const cached = this.fileContentCache.get(oldPath);
-        if (cached) {
-            this.fileContentCache.delete(oldPath);
-            this.fileContentCache.set(file.path, cached);
+        this.fileContentCache.delete(oldPath);
+        this.queueCleanup(file, cached?.links || [], oldPath);
+        await this.retryCleanup(oldPath);
+        if (!this.stopped && file.path === path && this.shouldProcessFile(file)) {
+            this.scheduleSource(file, this.cacheSource(file));
         }
-
-        // Route through debounce for consistency (avoids cascade on bulk renames)
-        this.processor.scheduleProcessing(file, this.settings.rules, this.settings.options);
     }
 
     private async handleFileDelete(file: TFile) {
-        if (this.settings.options.enableLogging) {
-            console.log(`File deleted: ${file.path}`);
-        }
-
+        if (this.stopped) return;
+        const cached = this.fileContentCache.get(file.path);
         this.fileContentCache.delete(file.path);
+        this.queueCleanup(file, cached?.links || []);
+        await this.retryCleanup(file.path);
     }
 
     private shouldProcessFile(file: TFile): boolean {
@@ -158,11 +170,16 @@ export default class BacklinkMetadataPlugin extends Plugin {
         }
 
         return this.settings.rules.some(rule => {
-            return rule.enabled && this.ruleEngine.matchesSourcePattern(rule, file);
+            return rule.enabled && this.ruleEngine.validateRule(rule).isValid && this.ruleEngine.matchesSourcePattern(rule, file);
         });
     }
 
     private addCommands() {
+        this.addCommand({
+            id: 'retry-pending-backlink-cleanup',
+            name: 'Retry pending backlink cleanup',
+            callback: () => this.retryCleanup(),
+        });
         this.addCommand({
             id: 'process-all-files',
             name: 'Process all files for backlink metadata',
@@ -177,8 +194,13 @@ export default class BacklinkMetadataPlugin extends Plugin {
             callback: async () => {
                 const activeFile = this.app.workspace.getActiveFile();
                 if (activeFile) {
-                    await this.processor.processFile(activeFile, this.settings.rules, this.settings.options);
-                    new Notice('Current file processed successfully');
+                    this.seedSourceCache();
+                    try {
+                        await this.processor.processFile(activeFile, this.settings.rules, this.settings.options);
+                        new Notice('Current file processed successfully');
+                    } catch (error) {
+                        new Notice(`Error processing current file: ${error instanceof Error ? error.message : String(error)}`);
+                    }
                 } else {
                     new Notice('No active file to process');
                 }
@@ -203,6 +225,7 @@ export default class BacklinkMetadataPlugin extends Plugin {
     }
 
     private async processAllFiles() {
+        this.seedSourceCache();
         const notice = new Notice('Processing all files...', 0);
         let processed = 0;
 
@@ -217,7 +240,7 @@ export default class BacklinkMetadataPlugin extends Plugin {
             );
 
             notice.hide();
-            new Notice(`Successfully processed ${processed} files`);
+            new Notice(this.stopped ? `Processing stopped after ${processed} files` : `Successfully processed ${processed} files`);
         } catch (error) {
             notice.hide();
             new Notice(`Error processing files: ${error instanceof Error ? error.message : String(error)}`);
@@ -244,6 +267,7 @@ export default class BacklinkMetadataPlugin extends Plugin {
     }
 
     private async bulkUpdateMetadataFromBacklinks() {
+        this.seedSourceCache();
         const notice = new Notice('Scanning backlinks from source files...', 0);
 
         try {
@@ -267,25 +291,30 @@ export default class BacklinkMetadataPlugin extends Plugin {
             notice.setMessage(`Found ${uniqueSourceFiles.length} source files, scanning backlinks...`);
 
             let processedCount = 0;
+            let failedCount = 0;
+            let attemptedCount = 0;
             const BATCH_SIZE = 20;
 
             for (const sourceFile of uniqueSourceFiles) {
+                if (this.stopped) break;
+                attemptedCount++;
                 try {
                     await this.processor.processFile(sourceFile, this.settings.rules, this.settings.options);
                     processedCount++;
                 } catch (error) {
+                    failedCount++;
                     console.warn(`Error processing source file ${sourceFile.path}:`, error);
                 }
 
                 // Yield to UI every batch
-                if (processedCount % BATCH_SIZE === 0) {
+                if (attemptedCount % BATCH_SIZE === 0) {
                     notice.setMessage(`Processing: ${processedCount}/${uniqueSourceFiles.length} source files...`);
                     await new Promise(resolve => setTimeout(resolve, 0));
                 }
             }
 
             notice.hide();
-            new Notice(`Bulk update complete: processed ${processedCount} source files`);
+            new Notice(`Bulk update ${this.stopped ? 'stopped' : 'complete'}: processed ${processedCount} source files, ${failedCount} failed`);
 
         } catch (error) {
             notice.hide();
@@ -298,12 +327,17 @@ export default class BacklinkMetadataPlugin extends Plugin {
         const saved = await this.loadData();
         this.settings = {
             ...DEFAULT_SETTINGS,
-            ...saved,
+            rules: (Array.isArray(saved?.rules) ? saved.rules : DEFAULT_SETTINGS.rules).map((rule: Rule) => ({ ...rule })),
             options: {
                 ...DEFAULT_SETTINGS.options,
                 ...(saved?.options || {}),
             },
         };
+    }
+
+    setDateFormat(format: string): void {
+        this.settings.options.dateFormat = format;
+        this.dateExtractor?.setDateFormat(format);
     }
 
     async saveSettings() {
@@ -315,10 +349,13 @@ export default class BacklinkMetadataPlugin extends Plugin {
 class BacklinkMetadataSettingTab extends PluginSettingTab {
     plugin: BacklinkMetadataPlugin;
     private settingsSaveTimer: ReturnType<typeof setTimeout> | null = null;
+    private ruleDrafts = new Map<string, Rule>();
+    private savingRules = new Set<string>();
 
     constructor(app: App, plugin: BacklinkMetadataPlugin) {
         super(app, plugin);
         this.plugin = plugin;
+        this.plugin.register(() => this.flushSettingsSave());
     }
 
     /**
@@ -329,14 +366,56 @@ class BacklinkMetadataSettingTab extends PluginSettingTab {
             clearTimeout(this.settingsSaveTimer);
         }
         this.settingsSaveTimer = setTimeout(() => {
-            this.plugin.saveSettings();
-            this.settingsSaveTimer = null;
+            this.flushSettingsSave();
         }, 500);
+    }
+
+    private flushSettingsSave(): void {
+        if (this.settingsSaveTimer === null) return;
+        clearTimeout(this.settingsSaveTimer);
+        this.settingsSaveTimer = null;
+        void this.saveOptions();
+    }
+
+    private async saveOptions(): Promise<void> {
+        this.plugin.setDateFormat(this.plugin.settings.options.dateFormat);
+        try {
+            await this.plugin.saveSettings();
+        } catch (error) {
+            new Notice(`Options changed in memory but were not saved. Change an option again to retry before reloading: ${error instanceof Error ? error.message : String(error)}`);
+        }
+    }
+
+    hide(): void {
+        this.flushSettingsSave();
+    }
+
+    private focusRule(id?: string): void {
+        const row = Array.from(this.containerEl.querySelectorAll<HTMLElement>('.rule-container'))
+            .find(element => element.dataset.ruleId === id);
+        (row?.querySelector<HTMLButtonElement>('button') || this.containerEl.querySelector<HTMLButtonElement>('.add-rule-button'))?.focus();
+    }
+
+    private redisplayAfterFailure(): void {
+        const active = this.containerEl.ownerDocument.activeElement;
+        const inside = active && this.containerEl.contains(active);
+        const row = inside ? active.closest<HTMLElement>('.rule-container') : null;
+        const controls = 'input, select, button';
+        const index = inside ? Array.from((row || this.containerEl).querySelectorAll(controls)).indexOf(active) : -1;
+        const ruleId = row?.dataset.ruleId;
+        this.display();
+        if (!inside) return;
+        const replacementRow = ruleId ? Array.from(this.containerEl.querySelectorAll<HTMLElement>('.rule-container'))
+            .find(element => element.dataset.ruleId === ruleId) : null;
+        const replacement = ruleId && !replacementRow ? this.containerEl.querySelector<HTMLElement>('.add-rule-button')
+            : (replacementRow || this.containerEl).querySelectorAll<HTMLElement>(controls)[index];
+        replacement?.focus();
     }
 
     display(): void {
         const { containerEl } = this;
         containerEl.empty();
+        containerEl.addClass('backlink-metadata-settings');
 
         // Plugin options section
         new Setting(containerEl).setName('Plugin Options').setHeading();
@@ -348,18 +427,18 @@ class BacklinkMetadataSettingTab extends PluginSettingTab {
                 .setValue(this.plugin.settings.options.preserveHistory)
                 .onChange(async (value) => {
                     this.plugin.settings.options.preserveHistory = value;
-                    await this.plugin.saveSettings();
+                    await this.saveOptions();
                 })
             );
 
         new Setting(containerEl)
             .setName('Update on delete')
-            .setDesc('Clean up metadata when links are removed')
+            .setDesc('Remove generated source links when links or source notes are deleted; dates and history are preserved')
             .addToggle(toggle => toggle
                 .setValue(this.plugin.settings.options.updateOnDelete)
                 .onChange(async (value) => {
                     this.plugin.settings.options.updateOnDelete = value;
-                    await this.plugin.saveSettings();
+                    await this.saveOptions();
                 })
             );
 
@@ -370,7 +449,7 @@ class BacklinkMetadataSettingTab extends PluginSettingTab {
                 .setPlaceholder('YYYY-MM-DD')
                 .setValue(this.plugin.settings.options.dateFormat)
                 .onChange((value) => {
-                    this.plugin.settings.options.dateFormat = value || 'YYYY-MM-DD';
+                    this.plugin.setDateFormat(value || 'YYYY-MM-DD');
                     this.debouncedSaveSettings();
                 })
             );
@@ -400,7 +479,7 @@ class BacklinkMetadataSettingTab extends PluginSettingTab {
                 .setValue(this.plugin.settings.options.enableLogging)
                 .onChange(async (value) => {
                     this.plugin.settings.options.enableLogging = value;
-                    await this.plugin.saveSettings();
+                    await this.saveOptions();
                 })
             );
 
@@ -413,6 +492,7 @@ class BacklinkMetadataSettingTab extends PluginSettingTab {
             .setDesc('Create a new metadata update rule')
             .addButton(button => button
                 .setButtonText('Add Rule')
+                .setClass('add-rule-button')
                 .onClick(() => {
                     this.addNewRule();
                 })
@@ -431,6 +511,7 @@ class BacklinkMetadataSettingTab extends PluginSettingTab {
     private displayRule(containerEl: HTMLElement, rule: Rule, index: number) {
         const ruleContainer = containerEl.createDiv('rule-container');
         ruleContainer.setAttribute('role', 'listitem');
+        ruleContainer.dataset.ruleId = rule.id;
 
         const displaySource = rule.sourcePattern.endsWith('/*')
             ? rule.sourcePattern.slice(0, -2)
@@ -454,6 +535,8 @@ class BacklinkMetadataSettingTab extends PluginSettingTab {
                     });
                 button.buttonEl.setAttribute('aria-label', `Delete rule: ${rule.name || `Rule ${index + 1}`}`);
             });
+        const draft = this.ruleDrafts.get(rule.id);
+        if (draft) this.renderRuleEditor(ruleContainer, draft);
     }
 
     private addNewRule() {
@@ -469,8 +552,14 @@ class BacklinkMetadataSettingTab extends PluginSettingTab {
         };
 
         this.plugin.settings.rules.push(newRule);
-        this.plugin.saveSettings();
+        void this.plugin.saveSettings().catch(error => {
+            const index = this.plugin.settings.rules.indexOf(newRule);
+            if (index !== -1) this.plugin.settings.rules.splice(index, 1);
+            this.redisplayAfterFailure();
+            new Notice(`Could not add rule. Retry Add Rule; existing drafts are preserved: ${error instanceof Error ? error.message : String(error)}`);
+        });
         this.display();
+        this.focusRule(newRule.id);
     }
 
     private editRule(ruleContainer: HTMLElement, index: number) {
@@ -480,7 +569,9 @@ class BacklinkMetadataSettingTab extends PluginSettingTab {
             return;
         }
 
-        this.renderRuleEditor(ruleContainer, rule);
+        const draft = { ...rule };
+        this.ruleDrafts.set(rule.id, draft);
+        this.renderRuleEditor(ruleContainer, draft);
     }
 
     private renderRuleEditor(ruleContainer: HTMLElement, rule: Rule) {
@@ -493,7 +584,7 @@ class BacklinkMetadataSettingTab extends PluginSettingTab {
         editorContainer.setAttribute('aria-label', `Editing rule: ${rule.name}`);
 
         // Live region for screen reader announcements
-        const liveRegion = editorContainer.createDiv('sr-live-region');
+        const liveRegion = ruleContainer.querySelector<HTMLElement>('.sr-live-region') || ruleContainer.createDiv('sr-live-region');
         liveRegion.setAttribute('aria-live', 'polite');
         liveRegion.setAttribute('role', 'status');
 
@@ -510,7 +601,7 @@ class BacklinkMetadataSettingTab extends PluginSettingTab {
         // Source Pattern
         new Setting(editorContainer)
             .setName('Source Pattern')
-            .setDesc('Glob pattern for files that trigger updates (click to browse folders)')
+            .setDesc('Glob pattern for files that trigger updates (use Browse folders)')
             .addText(text => {
                 const displayValue = rule.sourcePattern.endsWith('/*')
                     ? rule.sourcePattern.slice(0, -2)
@@ -522,16 +613,17 @@ class BacklinkMetadataSettingTab extends PluginSettingTab {
                         rule.sourcePattern = value;
                     });
 
-                textEl.inputEl.style.cursor = 'pointer';
-                textEl.inputEl.setAttribute('aria-haspopup', 'dialog');
-                this.plugin.registerDomEvent(textEl.inputEl, 'click', () => {
-                    const modal = new FolderSuggestModal(this.plugin.app, (folder) => {
-                        const pattern = folder.path ? `${folder.path}/*` : '*';
-                        rule.sourcePattern = pattern;
-                        textEl.setValue(folder.path || '');
+                const controls = textEl.inputEl.parentElement;
+                if (!controls) return textEl;
+                const browse = new ButtonComponent(controls)
+                    .setButtonText('Browse folders')
+                    .onClick(() => {
+                        new FolderSuggestModal(this.plugin.app, (folder) => {
+                            rule.sourcePattern = folder.path ? `${folder.path}/*` : '**';
+                            textEl.setValue(folder.path || '');
+                        }, () => browse.buttonEl.focus()).open();
                     });
-                    modal.open();
-                });
+                browse.buttonEl.setAttribute('aria-label', 'Browse source folders');
 
                 return textEl;
             });
@@ -539,7 +631,9 @@ class BacklinkMetadataSettingTab extends PluginSettingTab {
         // Target Type (Tag or Folder)
         new Setting(editorContainer)
             .setName('Target Type')
-            .addDropdown(dropdown => dropdown
+            .addDropdown(dropdown => {
+                dropdown.selectEl.dataset.control = 'target-type';
+                dropdown
                 .addOption('tag', 'Tag')
                 .addOption('folder', 'Folder')
                 .setValue(rule.targetTag ? 'tag' : 'folder')
@@ -553,14 +647,15 @@ class BacklinkMetadataSettingTab extends PluginSettingTab {
                     }
                     // Re-render the entire editor to swap the target field cleanly
                     this.renderRuleEditor(ruleContainer, rule);
+                    ruleContainer.querySelector<HTMLSelectElement>('[data-control=target-type]')?.focus();
                     liveRegion.textContent = `Target type changed to ${value}.`;
-                })
-            );
+                });
+            });
 
         // Target Value
         new Setting(editorContainer)
             .setName(rule.targetTag ? 'Target Tag' : 'Target Folder')
-            .setDesc(rule.targetTag ? 'Tag to match (e.g., "#movie")' : 'Folder path to match (click to browse folders)')
+            .setDesc(rule.targetTag ? 'Tag to match (e.g., "#movie")' : 'Folder path to match (use Browse folders)')
             .addText(text => {
                 let displayValue = rule.targetTag || rule.targetFolder || '';
                 if (!rule.targetTag && displayValue.endsWith('/*')) {
@@ -580,17 +675,18 @@ class BacklinkMetadataSettingTab extends PluginSettingTab {
                     });
 
                 if (rule.targetFolder !== undefined) {
-                    textComponent.inputEl.style.cursor = 'pointer';
-                    textComponent.inputEl.setAttribute('aria-haspopup', 'dialog');
-                    this.plugin.registerDomEvent(textComponent.inputEl, 'click', () => {
-                        const modal = new FolderSuggestModal(this.plugin.app, (folder) => {
-                            const pattern = folder.path ? `${folder.path}/*` : '*';
-                            rule.targetFolder = pattern;
-                            rule.targetTag = undefined;
-                            textComponent.setValue(folder.path || '');
+                    const controls = textComponent.inputEl.parentElement;
+                    if (!controls) return textComponent;
+                    const browse = new ButtonComponent(controls)
+                        .setButtonText('Browse folders')
+                        .onClick(() => {
+                            new FolderSuggestModal(this.plugin.app, (folder) => {
+                                rule.targetFolder = folder.path ? `${folder.path}/*` : '**';
+                                rule.targetTag = undefined;
+                                textComponent.setValue(folder.path || '');
+                            }, () => browse.buttonEl.focus()).open();
                         });
-                        modal.open();
-                    });
+                    browse.buttonEl.setAttribute('aria-label', 'Browse target folders');
                 }
 
                 return textComponent;
@@ -618,14 +714,14 @@ class BacklinkMetadataSettingTab extends PluginSettingTab {
                 .addOption('replace_link', 'Replace Link')
                 .setValue(rule.valueType)
                 .onChange((value) => {
-                    rule.valueType = value as any;
+                    rule.valueType = value as Rule['valueType'];
                 })
             );
 
         // Priority
         new Setting(editorContainer)
             .setName('Priority')
-            .setDesc('Lower numbers = higher priority (1–100)')
+            .setDesc('Execution order (1–100): lower numbers run first; later rules may overwrite earlier values')
             .addText(text => {
                 text.setValue(rule.priority.toString())
                     .onChange((value) => {
@@ -665,6 +761,7 @@ class BacklinkMetadataSettingTab extends PluginSettingTab {
         const saveButton = buttonContainer.createEl('button', { text: 'Save' });
         saveButton.setAttribute('aria-label', `Save rule: ${rule.name}`);
         saveButton.onclick = async () => {
+            if (this.savingRules.has(rule.id)) return;
             const validation = this.validateRuleInputs(rule);
             if (!validation.isValid) {
                 new Notice(`Validation error: ${validation.errors.join(', ')}`);
@@ -672,77 +769,86 @@ class BacklinkMetadataSettingTab extends PluginSettingTab {
             }
 
             const ruleIndex = this.plugin.settings.rules.findIndex(r => r.id === rule.id);
-            if (ruleIndex !== -1) {
-                this.plugin.settings.rules[ruleIndex] = { ...rule };
+            if (ruleIndex === -1) return;
+            const previous = this.plugin.settings.rules[ruleIndex];
+            const replacement = { ...rule };
+            this.plugin.settings.rules[ruleIndex] = replacement;
+            const savedDraft = JSON.stringify(rule);
+            const wasFocused = saveButton.ownerDocument.activeElement === saveButton;
+            this.savingRules.add(rule.id);
+            saveButton.disabled = true;
+            try {
+                await this.plugin.saveSettings();
+            } catch (error) {
+                const currentIndex = this.plugin.settings.rules.findIndex(r => r.id === rule.id);
+                if (this.plugin.settings.rules[currentIndex] === replacement) this.plugin.settings.rules[currentIndex] = previous;
+                saveButton.disabled = false;
+                if (wasFocused && saveButton.ownerDocument.activeElement === saveButton.ownerDocument.body) saveButton.focus();
+                new Notice(`Could not save rule: ${error instanceof Error ? error.message : String(error)}`);
+                return;
+            } finally {
+                this.savingRules.delete(rule.id);
+                saveButton.disabled = false;
             }
-
-            await this.plugin.saveSettings();
+            if (!this.plugin.settings.rules.includes(replacement) || this.ruleDrafts.get(rule.id) !== rule
+                || JSON.stringify(rule) !== savedDraft) return;
+            this.ruleDrafts.delete(rule.id);
             editorContainer.remove();
             this.display();
+            this.focusRule(rule.id);
             new Notice('Rule saved successfully');
         };
 
         const cancelButton = buttonContainer.createEl('button', { text: 'Cancel' });
         cancelButton.setAttribute('aria-label', `Cancel editing rule: ${rule.name}`);
         cancelButton.onclick = () => {
+            this.ruleDrafts.delete(rule.id);
             editorContainer.remove();
+            this.focusRule(rule.id);
         };
     }
 
     private validateRuleInputs(rule: Rule): { isValid: boolean; errors: string[] } {
-        const errors: string[] = [];
-
-        if (!rule.name || rule.name.trim() === '') {
-            errors.push('Rule name is required');
-        }
-
-        if (!rule.sourcePattern || rule.sourcePattern.trim() === '') {
-            errors.push('Source pattern is required');
-        }
-
-        if (!rule.targetTag && !rule.targetFolder) {
-            errors.push('Either target tag or target folder must be specified');
-        }
-
-        if (rule.targetTag && !rule.targetTag.startsWith('#')) {
-            errors.push('Target tag must start with #');
-        }
-
-        if (!rule.updateField || rule.updateField.trim() === '') {
-            errors.push('Update field is required');
-        }
-
-        if (rule.priority < 1) {
-            errors.push('Priority must be at least 1');
-        }
-
-        return {
-            isValid: errors.length === 0,
-            errors
-        };
+        const validation = new RuleEngine(this.plugin.app).validateRule(rule);
+        const errors = [...validation.errors];
+        if (!rule.name.trim()) errors.push('Rule name is required');
+        if (!rule.sourcePattern.trim()) errors.push('Source pattern is required');
+        if (!rule.targetTag && !rule.targetFolder) errors.push('Either target tag or target folder must be specified');
+        if (rule.targetTag && !rule.targetTag.startsWith('#')) errors.push('Target tag must start with #');
+        return { isValid: errors.length === 0, errors };
     }
 
     private confirmDeleteRule(index: number, ruleName: string) {
-        const modal = new ConfirmDeleteModal(this.plugin.app, ruleName, () => {
-            this.plugin.settings.rules.splice(index, 1);
-            this.plugin.saveSettings();
+        const rule = this.plugin.settings.rules[index];
+        const modal = new ConfirmDeleteModal(this.plugin.app, ruleName, async () => {
+            const currentIndex = this.plugin.settings.rules.indexOf(rule);
+            if (currentIndex === -1) return;
+            this.plugin.settings.rules.splice(currentIndex, 1);
             this.display();
+            this.focusRule(this.plugin.settings.rules[currentIndex]?.id);
+            try {
+                await this.plugin.saveSettings();
+            } catch (error) {
+                if (!this.plugin.settings.rules.some(current => current.id === rule.id)) {
+                    this.plugin.settings.rules.splice(Math.min(currentIndex, this.plugin.settings.rules.length), 0, rule);
+                }
+                this.redisplayAfterFailure();
+                new Notice(`Could not delete rule. Retry Delete; drafts are preserved: ${error instanceof Error ? error.message : String(error)}`);
+                return;
+            }
+            if (!this.plugin.settings.rules.some(current => current.id === rule.id)) this.ruleDrafts.delete(rule.id);
         });
         modal.open();
     }
 
-    private deleteRule(index: number) {
-        this.plugin.settings.rules.splice(index, 1);
-        this.plugin.saveSettings();
-        this.display();
-    }
+
 }
 
 class ConfirmDeleteModal extends Modal {
     private ruleName: string;
-    private onConfirm: () => void;
+    private onConfirm: () => Promise<void>;
 
-    constructor(app: App, ruleName: string, onConfirm: () => void) {
+    constructor(app: App, ruleName: string, onConfirm: () => Promise<void>) {
         super(app);
         this.ruleName = ruleName;
         this.onConfirm = onConfirm;
@@ -750,6 +856,7 @@ class ConfirmDeleteModal extends Modal {
 
     onOpen() {
         const { contentEl } = this;
+        contentEl.addClass('backlink-metadata-settings');
         contentEl.createEl('h3', { text: 'Delete Rule' });
         contentEl.createEl('p', { text: `Are you sure you want to delete "${this.ruleName}"? This cannot be undone.` });
 
@@ -757,7 +864,9 @@ class ConfirmDeleteModal extends Modal {
 
         const deleteBtn = buttonContainer.createEl('button', { text: 'Delete', cls: 'mod-warning' });
         deleteBtn.onclick = () => {
-            this.onConfirm();
+            void this.onConfirm().catch(error => {
+                new Notice(`Could not delete rule. Reopen settings and retry: ${error instanceof Error ? error.message : String(error)}`);
+            });
             this.close();
         };
 
@@ -773,13 +882,18 @@ class ConfirmDeleteModal extends Modal {
 }
 
 class FolderSuggestModal extends FuzzySuggestModal<TFolder> {
-    constructor(app: App, private onChoose: (folder: TFolder) => void) {
+    constructor(app: App, private onChoose: (folder: TFolder) => void, private onDismiss: () => void) {
         super(app);
         this.setPlaceholder('Choose a folder...');
     }
 
+    onClose(): void {
+        super.onClose();
+        this.onDismiss();
+    }
+
     getItems(): TFolder[] {
-        return this.app.vault.getAllFolders();
+        return this.app.vault.getAllLoadedFiles().filter((file): file is TFolder => file instanceof TFolder);
     }
 
     getItemText(folder: TFolder): string {

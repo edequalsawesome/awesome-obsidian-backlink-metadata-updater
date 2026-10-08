@@ -21,8 +21,7 @@ export type ValueType =
     | 'date_and_title' 
     | 'append_link' 
     | 'append_unique_link'
-    | 'replace_link'
-    | 'custom';
+    | 'replace_link';
 
 export interface PluginOptions {
     preserveHistory: boolean;
