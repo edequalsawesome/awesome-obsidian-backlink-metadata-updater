@@ -1,5 +1,5 @@
-import { App, TFile, CachedMetadata, parseFrontMatterEntry } from 'obsidian';
-import { Rule, ProcessingContext, MetadataUpdate, ValueType, PluginOptions } from '../types';
+import { App, TFile, moment, getLinkpath } from 'obsidian';
+import { Rule, ProcessingContext, ValueType, PluginOptions } from '../types';
 import { DateExtractor } from '../utils/date-extractor';
 import { RuleEngine } from '../engine/rule-engine';
 
@@ -10,6 +10,8 @@ export class BacklinkProcessor {
     private dateExtractor: DateExtractor;
     private ruleEngine: RuleEngine;
     private processingQueue: Map<string, ReturnType<typeof setTimeout>> = new Map();
+    private stopped = false;
+    private sourceOperations = new Map<string, Promise<unknown>>();
 
     constructor(app: App, dateExtractor: DateExtractor, ruleEngine: RuleEngine) {
         this.app = app;
@@ -21,7 +23,8 @@ export class BacklinkProcessor {
      * Process a file with debouncing to handle rapid edits.
      * Captures file path (not TFile reference) to avoid stale references.
      */
-    scheduleProcessing(file: TFile, rules: Rule[], options: PluginOptions): void {
+    scheduleProcessing(file: TFile, rules: Rule[], options: PluginOptions, onError?: (error: unknown) => void): void {
+        if (this.stopped || file.extension !== 'md') return;
         const filePath = file.path;
 
         // Clear existing timeout for this file
@@ -31,11 +34,17 @@ export class BacklinkProcessor {
 
         // Schedule new processing — re-resolve file by path at execution time
         const timeout = setTimeout(async () => {
+            if (this.processingQueue.get(filePath) !== timeout) return;
+            this.processingQueue.delete(filePath);
             const currentFile = this.app.vault.getAbstractFileByPath(filePath);
             if (currentFile instanceof TFile) {
-                await this.processFile(currentFile, rules, options);
+                try {
+                    await this.processFile(currentFile, rules, options);
+                } catch (error) {
+                    console.error(`Error processing file ${filePath}:`, error);
+                    onError?.(error);
+                }
             }
-            this.processingQueue.delete(filePath);
         }, options.debounceMs);
 
         this.processingQueue.set(filePath, timeout);
@@ -45,13 +54,31 @@ export class BacklinkProcessor {
      * Process a file immediately (for bulk operations)
      */
     async processFile(file: TFile, rules: Rule[], options: PluginOptions): Promise<void> {
+        const sourcePath = file.path;
+        return this.runForSource(sourcePath, () => this.processFileNow(file, rules, options, sourcePath));
+    }
+
+    private runForSource<T>(path: string, operation: () => Promise<T>): Promise<T> {
+        const previous = this.sourceOperations.get(path) || Promise.resolve();
+        const next = previous.catch(() => {}).then(operation);
+        this.sourceOperations.set(path, next);
+        const clear = () => {
+            if (this.sourceOperations.get(path) === next) this.sourceOperations.delete(path);
+        };
+        void next.then(clear, clear);
+        return next;
+    }
+
+    private async processFileNow(file: TFile, rules: Rule[], options: PluginOptions, sourcePath: string): Promise<void> {
+        if (this.stopped || file.extension !== 'md') return;
+        if (file.path !== sourcePath || this.app.vault.getAbstractFileByPath(sourcePath) !== file) return;
         try {
             if (options.enableLogging) {
                 console.log(`BacklinkProcessor: Processing file: ${file.path}`);
             }
 
             // Extract outgoing links from the file
-            const outgoingLinks = this.extractOutgoingLinks(file);
+            const outgoingLinks = this.extractOutgoingLinks(file, rules);
 
             if (options.enableLogging) {
                 console.log(`BacklinkProcessor: Found ${outgoingLinks.length} outgoing links`);
@@ -63,9 +90,11 @@ export class BacklinkProcessor {
 
             // Process each linked file
             for (const linkPath of outgoingLinks) {
+                if (this.stopped) return;
+                if (file.path !== sourcePath || this.app.vault.getAbstractFileByPath(sourcePath) !== file) return;
                 const targetFile = this.app.vault.getAbstractFileByPath(linkPath);
 
-                if (!(targetFile instanceof TFile)) {
+                if (!(targetFile instanceof TFile) || targetFile.extension !== 'md') {
                     continue; // Skip if not a valid file
                 }
 
@@ -73,6 +102,7 @@ export class BacklinkProcessor {
             }
         } catch (error) {
             console.error(`Error processing file ${file.path}:`, error);
+            throw error;
         }
     }
 
@@ -97,11 +127,14 @@ export class BacklinkProcessor {
         }
 
         // Process each applicable rule
+        const sourcePath = sourceFile.path;
         for (const rule of applicableRules) {
+            if (this.stopped) return;
+            if (sourceFile.path !== sourcePath || this.app.vault.getAbstractFileByPath(sourcePath) !== sourceFile) return;
             if (options.enableLogging) {
                 console.log(`BacklinkProcessor: Applying rule ${rule.name} to ${targetFile.path}`);
             }
-            await this.applyRule(sourceFile, targetFile, rule, options);
+            await this.applyRule(sourceFile, targetFile, rule, options, rules.map(rule => rule.updateField));
         }
     }
 
@@ -112,21 +145,24 @@ export class BacklinkProcessor {
         sourceFile: TFile,
         targetFile: TFile,
         rule: Rule,
-        options: PluginOptions
+        options: PluginOptions,
+        generatedFields: string[]
     ): Promise<void> {
         try {
             // Create processing context
             const context: ProcessingContext = {
                 sourceFile: sourceFile.path,
                 targetFile: targetFile.path,
-                extractedDate: this.dateExtractor.extractDate(sourceFile) || undefined,
-                extractedTitle: this.dateExtractor.extractTitle(sourceFile) || undefined,
+                extractedDate: rule.valueType === 'date' || rule.valueType === 'date_and_title'
+                    ? this.dateExtractor.extractDate(sourceFile, generatedFields) || undefined : undefined,
+                extractedTitle: rule.valueType === 'date_and_title'
+                    ? this.dateExtractor.extractTitle(sourceFile, generatedFields) || undefined : undefined,
                 rule
             };
 
             // Generate the value to update
             const updateValue = this.generateUpdateValue(context, options);
-            if (updateValue === null) {
+            if (updateValue === null || updateValue === undefined) {
                 if (options.enableLogging) {
                     console.log(`BacklinkProcessor: No valid value generated for rule ${rule.name} (${rule.valueType}), skipping update`);
                 }
@@ -138,6 +174,7 @@ export class BacklinkProcessor {
 
         } catch (error) {
             console.error(`Error applying rule ${rule.id}:`, error);
+            throw error;
         }
     }
 
@@ -183,8 +220,12 @@ export class BacklinkProcessor {
         context: ProcessingContext,
         options: PluginOptions
     ): Promise<void> {
+        if (this.stopped) return;
+        if (['__proto__', 'constructor', 'prototype'].includes(field)) {
+            throw new Error('Reserved metadata field name');
+        }
         await this.app.fileManager.processFrontMatter(targetFile, (frontMatter: any) => {
-            const currentValue = frontMatter[field];
+            const currentValue = Object.prototype.hasOwnProperty.call(frontMatter, field) ? frontMatter[field] : undefined;
             const newValue = this.mergeValues(currentValue, value, context.rule.valueType, options);
 
             if (options.enableLogging) {
@@ -217,19 +258,19 @@ export class BacklinkProcessor {
                 const newDateStr = typeof newValue === 'string' ? newValue : null;
 
                 if (currentDateStr && newDateStr) {
-                    const currentDate = new Date(currentDateStr);
-                    const newDate = new Date(newDateStr);
-                    const currentValid = !isNaN(currentDate.getTime());
-                    const newValid = !isNaN(newDate.getTime());
+                    const currentDate = this.parseStoredDate(currentDateStr, options.dateFormat);
+                    const newDate = moment(newDateStr, options.dateFormat, true);
+                    const currentValid = currentDate.isValid();
+                    const newValid = newDate.isValid();
 
-                    if (!currentValid || !newValid || newDate > currentDate) {
+                    if (!currentValid) return currentValue;
+                    if (!newValid || newDate > currentDate) {
                         return newValid ? newDateStr : currentDateStr;
                     }
                     return currentDateStr;
                 }
                 if (newDateStr) {
-                    const testDate = new Date(newDateStr);
-                    if (!isNaN(testDate.getTime())) return newDateStr;
+                    if (moment(newDateStr, options.dateFormat, true).isValid()) return newDateStr;
                 }
                 return currentValue;
             }
@@ -244,19 +285,21 @@ export class BacklinkProcessor {
                     : (typeof newValue === 'string' ? newValue : null);
 
                 if (currentDateVal && newDateVal) {
-                    const currentDate = new Date(currentDateVal);
-                    const newDate = new Date(newDateVal);
-                    const currentValid = !isNaN(currentDate.getTime());
-                    const newValid = !isNaN(newDate.getTime());
+                    const currentDate = this.parseStoredDate(currentDateVal, options.dateFormat);
+                    const newDate = moment(newDateVal, options.dateFormat, true);
+                    const currentValid = currentDate.isValid();
+                    const newValid = newDate.isValid();
 
-                    if (!currentValid || !newValid || newDate > currentDate) {
+                    if (!currentValid) return currentValue;
+                    if (newValid && newDate.valueOf() === currentDate.valueOf()
+                        && currentValue?.source && currentValue.source === newValue?.source) return newValue;
+                    if (!newValid || newDate > currentDate) {
                         return newValid ? newValue : currentValue;
                     }
                     return currentValue;
                 }
                 if (newDateVal) {
-                    const testDate = new Date(newDateVal);
-                    if (!isNaN(testDate.getTime())) return newValue;
+                    if (moment(newDateVal, options.dateFormat, true).isValid()) return newValue;
                 }
                 return currentValue;
             }
@@ -287,22 +330,21 @@ export class BacklinkProcessor {
         }
     }
 
+    private parseStoredDate(value: string, format: string): moment.Moment {
+        const configured = moment(value, format, true);
+        return configured.isValid() ? configured : moment(value, moment.ISO_8601, true);
+    }
+
     /**
      * Add entry to history tracking (capped at MAX_HISTORY_ENTRIES)
      */
     private addToHistory(frontMatter: any, field: string, value: any, context: ProcessingContext): void {
         // Use custom history field names for specific fields
-        let historyField: string;
-        if (field === 'lastWatched') {
-            historyField = 'watchHistory';
-        } else if (field === 'lastRead') {
-            historyField = 'readHistory';
-        } else {
-            historyField = `${field}History`;
-        }
+        const historyField = this.getHistoryField(field);
 
-        if (!frontMatter[historyField]) {
-            frontMatter[historyField] = [];
+        if (!Array.isArray(frontMatter[historyField])) {
+            const existing = Object.prototype.hasOwnProperty.call(frontMatter, historyField) ? frontMatter[historyField] : undefined;
+            frontMatter[historyField] = existing == null ? [] : [existing];
         }
 
         // For date fields, just store the date value (YYYY-MM-DD)
@@ -324,7 +366,9 @@ export class BacklinkProcessor {
                 frontMatter[historyField].push(historyEntry);
             }
         } else {
-            frontMatter[historyField].push(historyEntry);
+            const duplicate = frontMatter[historyField].some((entry: any) =>
+                entry?.sourceContext === context.sourceFile && JSON.stringify(entry.value) === JSON.stringify(value));
+            if (!duplicate) frontMatter[historyField].push(historyEntry);
         }
 
         // Cap history array size
@@ -336,14 +380,23 @@ export class BacklinkProcessor {
     /**
      * Extract outgoing links from a file (body content + frontmatter)
      */
-    extractOutgoingLinks(file: TFile): string[] {
+    private getHistoryField(field: string): string {
+        return field === 'lastWatched' ? 'watchHistory' : field === 'lastRead' ? 'readHistory' : `${field}History`;
+    }
+
+    extractOutgoingLinks(file: TFile, rules: Rule[] = []): string[] {
         const cache = this.app.metadataCache.getFileCache(file);
         const links: string[] = [];
+        const generatedFields = new Set<string>();
+        for (const rule of rules) {
+            generatedFields.add(rule.updateField);
+            generatedFields.add(this.getHistoryField(rule.updateField));
+        }
 
         // Extract links from body content
         if (cache?.links) {
             for (const link of cache.links) {
-                const resolvedFile = this.app.metadataCache.getFirstLinkpathDest(link.link, file.path);
+                const resolvedFile = this.app.metadataCache.getFirstLinkpathDest(getLinkpath(link.link), file.path);
                 if (resolvedFile && resolvedFile instanceof TFile) {
                     links.push(resolvedFile.path);
                 }
@@ -355,7 +408,8 @@ export class BacklinkProcessor {
             // Check frontmatterLinks if available (Obsidian 1.4+)
             if (cache.frontmatterLinks) {
                 for (const link of cache.frontmatterLinks) {
-                    const resolvedFile = this.app.metadataCache.getFirstLinkpathDest(link.link, file.path);
+                    if (generatedFields.has(link.key.split('.')[0])) continue;
+                    const resolvedFile = this.app.metadataCache.getFirstLinkpathDest(getLinkpath(link.link), file.path);
                     if (resolvedFile && resolvedFile instanceof TFile) {
                         links.push(resolvedFile.path);
                     }
@@ -370,6 +424,7 @@ export class BacklinkProcessor {
                                        'team', 'members', 'related', 'links', 'notes'];
 
                 for (const field of fieldsToCheck) {
+                    if (generatedFields.has(field)) continue;
                     const value = frontmatter[field];
                     if (value) {
                         const values = Array.isArray(value) ? value : [value];
@@ -380,7 +435,7 @@ export class BacklinkProcessor {
                                 const linkPattern = /\[\[([^\]]+)\]\]/g;
                                 let match;
                                 while ((match = linkPattern.exec(val)) !== null) {
-                                    const linkPath = match[1].split('|')[0]; // Handle aliased links
+                                    const linkPath = getLinkpath(match[1].split('|')[0]);
                                     const resolvedFile = this.app.metadataCache.getFirstLinkpathDest(linkPath, file.path);
                                     if (resolvedFile && resolvedFile instanceof TFile) {
                                         links.push(resolvedFile.path);
@@ -426,6 +481,7 @@ export class BacklinkProcessor {
         const BATCH_SIZE = 20;
 
         for (const file of allFiles) {
+            if (this.stopped) return;
             await this.processFile(file, rules, options);
             processed++;
 
@@ -443,21 +499,31 @@ export class BacklinkProcessor {
     /**
      * Clean up metadata when links are removed
      */
-    async cleanupRemovedLinks(sourceFile: TFile, removedLinks: string[], rules: Rule[], options: PluginOptions): Promise<void> {
-        if (!options.updateOnDelete) {
-            return;
-        }
+    async cleanupRemovedLinks(sourceFile: TFile, removedLinks: string[], rules: Rule[], options: PluginOptions, sourcePath = sourceFile.path): Promise<boolean> {
+        if (!options.updateOnDelete) return false;
+        if (removedLinks.length === 0) return true;
+        return this.runForSource(sourcePath, () => this.cleanupRemovedLinksNow(sourceFile, removedLinks, rules, options, sourcePath));
+    }
+
+    private async cleanupRemovedLinksNow(sourceFile: TFile, removedLinks: string[], rules: Rule[], options: PluginOptions, sourcePath: string): Promise<boolean> {
+        if (!options.updateOnDelete) return false;
 
         for (const linkPath of removedLinks) {
+            if (this.stopped || !options.updateOnDelete) return false;
             const targetFile = this.app.vault.getAbstractFileByPath(linkPath);
-            if (!(targetFile instanceof TFile)) continue;
+            if (!(targetFile instanceof TFile) || targetFile.extension !== 'md') continue;
 
-            const applicableRules = this.ruleEngine.findApplicableRules(sourceFile, targetFile, rules);
+            const applicableRules = this.ruleEngine.findApplicableRules({ ...sourceFile, path: sourcePath } as TFile, targetFile, rules);
 
             for (const rule of applicableRules) {
-                await this.removeFromMetadata(targetFile, rule.updateField, sourceFile.path, rule.valueType);
+                if (this.stopped || !options.updateOnDelete) return false;
+                const current = this.app.vault.getAbstractFileByPath(sourcePath);
+                if (current instanceof TFile && current.extension === 'md'
+                    && this.extractOutgoingLinks(current, rules).includes(linkPath)) break;
+                await this.removeFromMetadata(targetFile, rule.updateField, sourcePath, rule.valueType);
             }
         }
+        return true;
     }
 
     /**
@@ -479,7 +545,7 @@ export class BacklinkProcessor {
                 frontMatter[field] = currentValue.filter((item: any) => {
                     if (typeof item === 'string') {
                         return item !== linkToRemove;
-                    } else if (typeof item === 'object' && item.source) {
+                    } else if (item && typeof item === 'object' && item.source) {
                         return item.source !== linkToRemove;
                     }
                     return true;
@@ -489,7 +555,7 @@ export class BacklinkProcessor {
                 if (frontMatter[field].length === 0) {
                     delete frontMatter[field];
                 }
-            } else if (currentValue === linkToRemove) {
+            } else if (currentValue === linkToRemove || (valueType === 'date_and_title' && currentValue?.source === linkToRemove)) {
                 delete frontMatter[field];
             }
         });
@@ -499,6 +565,7 @@ export class BacklinkProcessor {
      * Cancel all pending processing
      */
     cancelAllProcessing(): void {
+        this.stopped = true;
         for (const timeout of this.processingQueue.values()) {
             clearTimeout(timeout);
         }

@@ -1,10 +1,10 @@
-import { App, TFile, TAbstractFile, CachedMetadata } from 'obsidian';
-import { Rule, ValidationResult, ProcessingContext } from '../types';
+import { App, TFile, getAllTags } from 'obsidian';
+import { Rule, ValidationResult } from '../types';
 
 export class RuleEngine {
     private app: App;
     private regexCache: Map<string, RegExp> = new Map();
-    private enableLogging: boolean = false;
+    private enableLogging = false;
 
     constructor(app: App) {
         this.app = app;
@@ -22,7 +22,7 @@ export class RuleEngine {
      */
     findApplicableRules(sourceFile: TFile, targetFile: TFile, rules: Rule[]): Rule[] {
         return rules
-            .filter(rule => rule.enabled)
+            .filter(rule => rule.enabled && this.validateRule(rule).isValid)
             .filter(rule => this.matchesSourcePattern(rule, sourceFile))
             .filter(rule => this.matchesTargetCriteria(rule, targetFile))
             .sort((a, b) => a.priority - b.priority); // Lower priority number = higher priority, processed first
@@ -35,7 +35,7 @@ export class RuleEngine {
         let pattern = rule.sourcePattern;
 
         // Handle glob-like patterns
-        if (pattern.includes('*')) {
+        if (/[*?]/.test(pattern)) {
             // Source patterns ending with /* should match recursively (/**)
             // since the folder picker appends /* but users expect recursive matching
             if (pattern.endsWith('/*') && !pattern.endsWith('/**')) {
@@ -75,7 +75,7 @@ export class RuleEngine {
             // Target folder semantically means "any file under this folder tree"
             // Bare folder names (no glob) get /** appended; /* gets promoted to /**
             let folderPattern = rule.targetFolder;
-            if (!folderPattern.includes('*')) {
+            if (!/[*?]/.test(folderPattern)) {
                 // Bare folder name like "Places" → "Places/**"
                 folderPattern = folderPattern.replace(/\/+$/, '') + '/**';
             } else if (folderPattern.endsWith('/*') && !folderPattern.endsWith('/**')) {
@@ -108,28 +108,7 @@ export class RuleEngine {
         // Remove # from tag if present
         const cleanTag = tag.startsWith('#') ? tag.slice(1) : tag;
 
-        // Check frontmatter tags
-        if (cache.frontmatter?.tags) {
-            const frontmatterTags = Array.isArray(cache.frontmatter.tags)
-                ? cache.frontmatter.tags
-                : [cache.frontmatter.tags];
-
-            if (frontmatterTags.some((t: string) => t === cleanTag)) {
-                return true;
-            }
-        }
-
-        // Check inline tags
-        if (cache.tags) {
-            const hasInlineTag = cache.tags.some((tagCache: any) =>
-                tagCache.tag === `#${cleanTag}` || tagCache.tag === cleanTag
-            );
-            if (hasInlineTag) {
-                return true;
-            }
-        }
-
-        return false;
+        return (getAllTags(cache) || []).includes(`#${cleanTag}`);
     }
 
     /**
@@ -214,8 +193,16 @@ export class RuleEngine {
             errors.push('Update field must be a valid identifier (letters, numbers, underscore, hyphen)');
         }
 
+        if (['__proto__', 'constructor', 'prototype'].includes(rule.updateField)) {
+            errors.push('Update field must not be a reserved property name');
+        }
+
+        if (!['date', 'date_and_title', 'append_link', 'append_unique_link', 'replace_link'].includes(rule.valueType)) {
+            errors.push('Unsupported value type');
+        }
+
         // Validate priority
-        if (rule.priority < 1) {
+        if (!Number.isFinite(rule.priority) || rule.priority < 1) {
             errors.push('Priority must be at least 1');
         }
 
@@ -232,6 +219,12 @@ export class RuleEngine {
     validateRuleSet(rules: Rule[]): ValidationResult {
         const errors: string[] = [];
         const warnings: string[] = [];
+
+        for (const rule of rules) {
+            const validation = this.validateRule(rule);
+            errors.push(...validation.errors.map(error => `${rule.name || rule.id}: ${error}`));
+            warnings.push(...validation.warnings.map(warning => `${rule.name || rule.id}: ${warning}`));
+        }
 
         // Check for duplicate IDs
         const ids = rules.map(r => r.id);
